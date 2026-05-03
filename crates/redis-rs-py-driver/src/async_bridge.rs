@@ -176,3 +176,299 @@ impl RawResult {
         }
     }
 }
+
+// =========================================================================
+// RedisRsAwaitable — deferred-callback async bridge.
+//
+// Verbatim port of django-vcache's RedisRsAwaitable (MIT, David Burke /
+// GlitchTip), via django-cachex-redis-rs. Keep this region in lockstep
+// with upstream — the design (5-poll busy-yield, callback fallback,
+// done-callbacks with optional contextvars.Context, cancel that wakes
+// callbacks) is load-bearing.
+// =========================================================================
+
+use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
+
+use crate::runtime::get_runtime;
+
+struct DoneCallback {
+    callback: Py<PyAny>,
+    context: Option<Py<PyAny>>,
+}
+
+struct CallbackState {
+    event_loop: Py<PyAny>,
+    callbacks: Vec<DoneCallback>,
+    result_slot: Arc<Mutex<Option<Result<RawResult, ()>>>>,
+}
+
+#[pyclass]
+pub struct RedisRsAwaitable {
+    rx: Option<oneshot::Receiver<RawResult>>,
+    value: Option<Py<PyAny>>,
+    error: Option<Py<PyAny>>,
+    resolved: bool,
+    cancelled: bool,
+    #[pyo3(get, set)]
+    _asyncio_future_blocking: bool,
+    polls: u8,
+    cb: Option<Box<CallbackState>>,
+}
+
+fn cancelled_error(py: Python<'_>) -> PyErr {
+    if let Ok(asyncio) = py.import("asyncio")
+        && let Ok(cls) = asyncio.getattr("CancelledError")
+        && let Ok(exc) = cls.call0()
+    {
+        return PyErr::from_value(exc.into_any());
+    }
+    pyo3::exceptions::PyRuntimeError::new_err("cancelled")
+}
+
+fn deliver_value(
+    this: &mut RedisRsAwaitable,
+    py: Python<'_>,
+    val: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    this.resolved = true;
+    this.value = Some(val.clone_ref(py));
+    let stop = py
+        .get_type::<pyo3::exceptions::PyStopIteration>()
+        .call1((val,))?;
+    Err(PyErr::from_value(stop.into_any()))
+}
+
+fn deliver_error(this: &mut RedisRsAwaitable, py: Python<'_>, err: PyErr) -> PyResult<Py<PyAny>> {
+    this.resolved = true;
+    this.error = Some(err.value(py).clone().into_any().unbind());
+    Err(err)
+}
+
+#[pymethods]
+impl RedisRsAwaitable {
+    fn __await__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    fn __iter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    #[getter]
+    fn _loop(&self) -> Option<&Py<PyAny>> {
+        self.cb.as_ref().map(|cb| &cb.event_loop)
+    }
+
+    fn __next__(slf: Py<Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let mut this = slf.borrow_mut(py);
+
+        if this.cancelled {
+            return Err(cancelled_error(py));
+        }
+
+        if this.resolved {
+            if let Some(ref exc) = this.error {
+                return Err(PyErr::from_value(exc.bind(py).clone()));
+            }
+            if let Some(ref value) = this.value {
+                let stop = py
+                    .get_type::<pyo3::exceptions::PyStopIteration>()
+                    .call1((value,))?;
+                return Err(PyErr::from_value(stop.into_any()));
+            }
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "awaitable already consumed",
+            ));
+        }
+
+        if let Some(ref cb) = this.cb {
+            let maybe = cb.result_slot.lock().unwrap().take();
+            if let Some(raw_result) = maybe {
+                this.cb = None;
+                return match raw_result {
+                    Ok(raw) => match raw.into_py(py) {
+                        Ok(val) => deliver_value(&mut this, py, val),
+                        Err(e) => deliver_error(&mut this, py, e),
+                    },
+                    Err(()) => deliver_error(
+                        &mut this,
+                        py,
+                        pyo3::exceptions::PyRuntimeError::new_err("operation was dropped"),
+                    ),
+                };
+            }
+        }
+
+        if let Some(rx) = this.rx.as_mut() {
+            match rx.try_recv() {
+                Ok(raw) => {
+                    this.rx = None;
+                    return match raw.into_py(py) {
+                        Ok(val) => deliver_value(&mut this, py, val),
+                        Err(e) => deliver_error(&mut this, py, e),
+                    };
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    this.rx = None;
+                    return deliver_error(
+                        &mut this,
+                        py,
+                        pyo3::exceptions::PyRuntimeError::new_err("operation was dropped"),
+                    );
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {}
+            }
+        } else if this.resolved {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "awaitable already consumed",
+            ));
+        }
+
+        this.polls += 1;
+
+        if this.polls <= 5 {
+            drop(this);
+            return Ok(py.None());
+        }
+
+        let rx = this.rx.take().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("awaitable already consumed")
+        })?;
+
+        let asyncio = py.import("asyncio")?;
+        let event_loop = asyncio.call_method0("get_running_loop")?;
+        this._asyncio_future_blocking = true;
+
+        let event_loop_ref = event_loop.clone().into_any().unbind();
+        let awaitable_ref = slf.clone_ref(py).into_any();
+        let result_slot = Arc::new(Mutex::new(None));
+        this.cb = Some(Box::new(CallbackState {
+            event_loop: event_loop.into_any().unbind(),
+            callbacks: Vec::new(),
+            result_slot: result_slot.clone(),
+        }));
+        get_runtime().spawn(async move {
+            let raw = rx.await;
+            let raw_result = match raw {
+                Ok(r) => Ok(r),
+                Err(_) => Err(()),
+            };
+            *result_slot.lock().unwrap() = Some(raw_result);
+            tokio::task::spawn_blocking(move || {
+                Python::try_attach(|py| {
+                    if let Ok(wake) = awaitable_ref.getattr(py, "_wake") {
+                        let _ =
+                            event_loop_ref.call_method1(py, "call_soon_threadsafe", (wake,));
+                    }
+                });
+            });
+        });
+
+        drop(this);
+        Ok(slf.into_any())
+    }
+
+    fn _wake(slf: Py<Self>, py: Python<'_>) {
+        let callbacks = {
+            let mut this = slf.borrow_mut(py);
+            this.cb
+                .as_mut()
+                .map(|cb| std::mem::take(&mut cb.callbacks))
+                .unwrap_or_default()
+        };
+        for done_cb in callbacks {
+            if let Some(ref ctx) = done_cb.context {
+                let _ = ctx.call_method1(py, "run", (&done_cb.callback, &slf));
+            } else {
+                let _ = done_cb.callback.call1(py, (&slf,));
+            }
+        }
+    }
+
+    #[pyo3(signature = (fn_cb, *, context=None))]
+    fn add_done_callback(&mut self, fn_cb: Py<PyAny>, context: Option<Py<PyAny>>) {
+        if let Some(ref mut cb) = self.cb {
+            cb.callbacks.push(DoneCallback {
+                callback: fn_cb,
+                context,
+            });
+        }
+    }
+
+    fn result(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.cancelled {
+            return Err(cancelled_error(py));
+        }
+        if let Some(ref exc) = self.error {
+            return Err(PyErr::from_value(exc.bind(py).clone()));
+        }
+        match &self.value {
+            Some(v) => Ok(v.clone_ref(py)),
+            None => Ok(py.None()),
+        }
+    }
+
+    fn exception(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if self.cancelled {
+            let asyncio = py.import("asyncio")?;
+            let exc = asyncio.getattr("CancelledError")?.call0()?;
+            return Ok(exc.into_any().unbind());
+        }
+        match &self.error {
+            Some(exc) => Ok(exc.clone_ref(py)),
+            None => Ok(py.None()),
+        }
+    }
+
+    #[pyo3(signature = (msg=None))]
+    fn cancel(slf: Py<Self>, py: Python<'_>, msg: Option<Py<PyAny>>) -> bool {
+        let mut this = slf.borrow_mut(py);
+        let _ = msg;
+        if this.resolved || this.cancelled {
+            return false;
+        }
+        this.cancelled = true;
+        this.rx = None;
+        let cb_state = this.cb.take();
+        drop(this);
+        if let Some(cb) = cb_state {
+            for done_cb in cb.callbacks {
+                let kwargs = pyo3::types::PyDict::new(py);
+                if let Some(ref ctx) = done_cb.context {
+                    let _ = kwargs.set_item("context", ctx);
+                }
+                let _ = cb.event_loop.call_method(
+                    py,
+                    "call_soon",
+                    (&done_cb.callback, slf.bind(py)),
+                    Some(&kwargs),
+                );
+            }
+        }
+        true
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    fn done(&self) -> bool {
+        self.resolved || self.cancelled
+    }
+}
+
+impl RedisRsAwaitable {
+    pub fn new(rx: oneshot::Receiver<RawResult>) -> Self {
+        RedisRsAwaitable {
+            rx: Some(rx),
+            value: None,
+            error: None,
+            resolved: false,
+            cancelled: false,
+            _asyncio_future_blocking: false,
+            polls: 0,
+            cb: None,
+        }
+    }
+}

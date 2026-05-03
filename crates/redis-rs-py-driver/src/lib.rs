@@ -19,7 +19,7 @@ use pyo3::prelude::*;
 #[pymodule]
 fn _driver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    // m.add_class::<async_bridge::RedisRsAwaitable>()?;
+    m.add_class::<async_bridge::RedisRsAwaitable>()?;
     // m.add_class::<driver::RedisRsDriver>()?;
 
     // m.add_function(wrap_pyfunction!(test_helpers::_test_resolved_bytes, m)?)?;
