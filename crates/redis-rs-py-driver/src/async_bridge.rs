@@ -358,8 +358,7 @@ impl RedisRsAwaitable {
             tokio::task::spawn_blocking(move || {
                 Python::try_attach(|py| {
                     if let Ok(wake) = awaitable_ref.getattr(py, "_wake") {
-                        let _ =
-                            event_loop_ref.call_method1(py, "call_soon_threadsafe", (wake,));
+                        let _ = event_loop_ref.call_method1(py, "call_soon_threadsafe", (wake,));
                     }
                 });
             });
