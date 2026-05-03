@@ -2,19 +2,21 @@
 
 import pytest
 from redis_rs_py import _driver
+from redis_rs_py.exceptions import ConnectionError as RedisConnectionError
+from redis_rs_py.exceptions import RedisError
 
 
 @pytest.mark.asyncio
 async def test_error_raises_connection_error() -> None:
     aw = _driver._test_error("could not connect")  # noqa: SLF001
-    with pytest.raises(ConnectionError, match="could not connect"):
+    with pytest.raises(RedisConnectionError, match="could not connect"):
         await aw
 
 
 @pytest.mark.asyncio
-async def test_server_error_raises_runtime_error() -> None:
+async def test_server_error_raises_redis_error() -> None:
     aw = _driver._test_server_error("WRONGTYPE")  # noqa: SLF001
-    with pytest.raises(RuntimeError, match="WRONGTYPE"):
+    with pytest.raises(RedisError, match="WRONGTYPE"):
         await aw
 
 
@@ -29,7 +31,7 @@ async def test_resolved_then_result_returns_value() -> None:
 @pytest.mark.asyncio
 async def test_errored_then_exception_returns_exc() -> None:
     aw = _driver._test_error("boom")  # noqa: SLF001
-    with pytest.raises(ConnectionError):
+    with pytest.raises(RedisConnectionError):
         await aw
     exc = aw.exception()
-    assert isinstance(exc, ConnectionError)
+    assert isinstance(exc, RedisConnectionError)

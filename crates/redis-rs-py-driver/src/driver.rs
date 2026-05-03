@@ -170,7 +170,11 @@ impl RedisRsDriver {
         });
         match conn {
             Ok(c) => Ok(RedisRsDriver { connection: c, url }),
-            Err(e) => Err(pyo3::exceptions::PyConnectionError::new_err(e)),
+            Err(e) => Err(crate::errors::to_py_err(redis::RedisError::from((
+                redis::ErrorKind::Io,
+                "connect",
+                e,
+            )))),
         }
     }
 

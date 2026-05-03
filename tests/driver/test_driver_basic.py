@@ -60,6 +60,7 @@ def test_set_with_ttl(driver, valkey_url: str) -> None:
 
 def test_connect_standard_bad_url_raises_connection_error() -> None:
     from redis_rs_py._driver import RedisRsDriver  # noqa: PLC0415
+    from redis_rs_py.exceptions import ConnectionError as RedisConnectionError  # noqa: PLC0415
 
-    with pytest.raises(ConnectionError):
+    with pytest.raises(RedisConnectionError):
         RedisRsDriver.connect_standard("redis://127.0.0.1:1/0")

@@ -30,8 +30,7 @@ pub enum RawResult {
     OptKeyAndBytes(Option<(String, Vec<u8>)>),
     CursorAndStrings(u64, Vec<String>),
     Value(redis::Value),
-    Error(String),
-    ServerError(String),
+    Error(crate::exceptions::ExceptionClass, String),
 }
 
 fn redis_value_to_py(py: Python<'_>, v: redis::Value) -> PyResult<Py<PyAny>> {
@@ -171,8 +170,7 @@ impl RawResult {
                 Ok(PyList::new(py, py_items)?.into_any().unbind())
             }
             RawResult::Value(v) => redis_value_to_py(py, v),
-            RawResult::Error(e) => Err(pyo3::exceptions::PyConnectionError::new_err(e)),
-            RawResult::ServerError(e) => Err(pyo3::exceptions::PyRuntimeError::new_err(e)),
+            RawResult::Error(class, e) => Err(class.into_py_err(py, e)),
         }
     }
 }

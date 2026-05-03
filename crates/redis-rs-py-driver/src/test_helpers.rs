@@ -64,13 +64,19 @@ pub fn _test_dropped() -> RedisRsAwaitable {
 #[pyfunction]
 pub fn _test_error(msg: String) -> RedisRsAwaitable {
     let (tx, rx) = oneshot::channel();
-    let _ = tx.send(RawResult::Error(msg));
+    let _ = tx.send(RawResult::Error(
+        crate::exceptions::ExceptionClass::ConnectionError,
+        msg,
+    ));
     RedisRsAwaitable::new(rx)
 }
 
 #[pyfunction]
 pub fn _test_server_error(msg: String) -> RedisRsAwaitable {
     let (tx, rx) = oneshot::channel();
-    let _ = tx.send(RawResult::ServerError(msg));
+    let _ = tx.send(RawResult::Error(
+        crate::exceptions::ExceptionClass::ResponseError,
+        msg,
+    ));
     RedisRsAwaitable::new(rx)
 }
