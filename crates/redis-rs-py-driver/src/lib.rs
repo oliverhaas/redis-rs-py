@@ -9,10 +9,10 @@
 mod async_bridge;
 mod commands;
 mod connection;
-mod driver;
 mod errors;
 pub(crate) mod exceptions;
 mod facade;
+mod helpers;
 mod raw_result;
 mod runtime;
 mod test_helpers;
@@ -24,7 +24,6 @@ fn _driver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     exceptions::register(m.py(), m)?;
     m.add_class::<async_bridge::RedisRsAwaitable>()?;
-    m.add_class::<driver::RedisRsDriver>()?;
     m.add_class::<facade::sync::Redis>()?;
     m.add_class::<facade::sync::Lock>()?;
 
@@ -37,6 +36,19 @@ fn _driver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(test_helpers::_test_error, m)?)?;
     m.add_function(wrap_pyfunction!(test_helpers::_test_server_error, m)?)?;
     m.add_function(wrap_pyfunction!(facade::kwargs::py_reset_warn_state, m)?)?;
+
+    // asyncio submodule — registered both as a PyO3 submodule and into
+    // sys.modules so `import redis_rs_py._driver.asyncio` resolves.
+    let asyncio_mod = PyModule::new(m.py(), "asyncio")?;
+    facade::asyncio_mod::register(m.py(), &asyncio_mod)?;
+    m.add_submodule(&asyncio_mod)?;
+
+    // PyO3 0.28: submodules are NOT auto-added to sys.modules. Do it
+    // manually so `from redis_rs_py._driver.asyncio import Redis` and
+    // dotted import paths work.
+    let sys = m.py().import("sys")?;
+    let modules = sys.getattr("modules")?;
+    modules.set_item("redis_rs_py._driver.asyncio", &asyncio_mod)?;
 
     Ok(())
 }

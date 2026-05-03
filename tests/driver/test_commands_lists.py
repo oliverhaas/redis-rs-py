@@ -357,8 +357,8 @@ def test_blmpop_timeout_returns_none(driver) -> None:
 @pytest.mark.asyncio
 async def test_ablpop_abrpop(driver) -> None:
     await driver.arpush("k", b"a", b"b")
-    assert await driver.ablpop(["k"], timeout=0.1) == ("k", b"a")
-    assert await driver.abrpop(["k"], timeout=0.1) == ("k", b"b")
+    assert await driver.ablpop(["k"], timeout=0.1) == (b"k", b"a")
+    assert await driver.abrpop(["k"], timeout=0.1) == (b"k", b"b")
     assert await driver.ablpop(["empty"], timeout=0.1) is None
 
 

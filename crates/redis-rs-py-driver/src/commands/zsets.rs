@@ -1,8 +1,8 @@
-// Sorted-set commands on RedisRsDriver.
+// Sorted-set commands.
 //
 // Every method exists as a sync + async pair:
-//   * `<cmd>(...)` — sync; releases the GIL via py.detach.
-//   * `a<cmd>(...)` — async; returns a RedisRsAwaitable.
+//   * `<cmd>(...)` on Redis — sync; releases the GIL via py.detach.
+//   * `<cmd>(...)` on AsyncRedis — async; returns a RedisRsAwaitable.
 //
 // WITHSCORES return shape: list[tuple[bytes, float]] everywhere.
 // Float-returning commands (ZINCRBY, ZSCORE, ZADD+INCR) return f64 directly —
@@ -13,11 +13,13 @@ use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyString, PyTuple};
 use redis::AsyncCommands;
 
 use crate::async_bridge::RawResult;
-use crate::driver::{RedisRsDriver, py_bytes_list, py_int};
 use crate::errors::to_py_err;
 use crate::exceptions::{DataError, ExceptionClass};
+use crate::facade::asyncio_mod::AsyncRedis;
+use crate::facade::sync::Redis;
+use crate::helpers::{py_bytes_list, py_int};
 use crate::raw_result::IntoRawResult;
-use crate::{async_op, conn_method, dispatch_cmd, sync_op};
+use crate::{conn_method, dispatch_cmd};
 
 // =========================================================================
 // Private type aliases to keep clippy::type_complexity quiet.
@@ -224,15 +226,15 @@ fn build_simple_range_cmd(
 // ZRANK / ZREVRANK helpers
 // =========================================================================
 
-fn rank_impl(
+fn rank_impl_sync(
     py: Python<'_>,
-    driver: &RedisRsDriver,
+    redis_obj: &Redis,
     name: &'static str,
     key: &str,
     member: &[u8],
     withscore: bool,
 ) -> PyResult<Py<PyAny>> {
-    let r: Result<redis::Value, _> = sync_op!(py, driver, conn, async {
+    let r: Result<redis::Value, _> = crate::sync_op!(py, redis_obj, conn, async {
         let mut cmd = redis::cmd(name);
         cmd.arg(key).arg(member);
         if withscore {
@@ -244,9 +246,9 @@ fn rank_impl(
     parse_rank_reply(py, value, withscore)
 }
 
-fn arank_impl(
+fn rank_impl_async(
     py: Python<'_>,
-    driver: &RedisRsDriver,
+    async_obj: &AsyncRedis,
     name: &'static str,
     key: &str,
     member: &[u8],
@@ -254,7 +256,7 @@ fn arank_impl(
 ) -> PyResult<Py<PyAny>> {
     let key = key.to_string();
     let member = member.to_vec();
-    async_op!(driver, py, conn, async {
+    crate::async_op!(async_obj, py, conn, async {
         let mut cmd = redis::cmd(name);
         cmd.arg(&key).arg(&member);
         if withscore {
@@ -622,18 +624,17 @@ pub(crate) fn render_scored_members(
 }
 
 // =========================================================================
-// #[pymethods] impl block — all sorted-set commands
+// Sync Redis methods
 // =========================================================================
 
 #[pymethods]
-impl RedisRsDriver {
+impl Redis {
     // =====================================================================
     // (a) ZADD with full NX/XX/GT/LT/CH/INCR flag matrix
     // =====================================================================
 
     #[pyo3(signature = (
         key,
-        *,
         mapping,
         nx = false,
         xx = false,
@@ -668,21 +669,724 @@ impl RedisRsDriver {
         let cmd = build_zadd_cmd(key, &pairs, flags);
         if incr {
             let r: redis::RedisResult<Option<f64>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
             match r.map_err(to_py_err)? {
                 Some(f) => Ok(f.into_pyobject(py)?.into_any().unbind()),
                 None => Ok(py.None()),
             }
         } else {
             let r: redis::RedisResult<i64> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
             py_int(py, r.map_err(to_py_err)?)
         }
     }
 
+    // =====================================================================
+    // ZREM (variadic)
+    // =====================================================================
+
+    #[pyo3(signature = (key, *members))]
+    fn zrem(&self, py: Python<'_>, key: &str, members: Vec<Vec<u8>>) -> PyResult<Py<PyAny>> {
+        if members.is_empty() {
+            return py_int(py, 0);
+        }
+        let r: redis::RedisResult<i64> = crate::sync_op!(py, self, conn, async {
+            conn_method!(&mut *conn, c, c.zrem(key, &members))
+        });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    // =====================================================================
+    // (b) ZRANGE / ZRANGESTORE
+    // =====================================================================
+
     #[pyo3(signature = (
         key,
+        start,
+        stop,
         *,
+        desc = false,
+        byscore = false,
+        bylex = false,
+        withscores = false,
+        offset = None,
+        num = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn zrange(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        start: &Bound<'_, PyAny>,
+        stop: &Bound<'_, PyAny>,
+        desc: bool,
+        byscore: bool,
+        bylex: bool,
+        withscores: bool,
+        offset: Option<i64>,
+        num: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let start_s = pyany_to_zrange_arg(start)?;
+        let stop_s = pyany_to_zrange_arg(stop)?;
+        let cmd = build_zrange_cmd(
+            "ZRANGE",
+            &[key],
+            &start_s,
+            &stop_s,
+            byscore,
+            bylex,
+            desc,
+            offset,
+            num,
+            withscores,
+        )?;
+        if withscores {
+            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            render_scored_members(py, r.map_err(to_py_err)?)
+        } else {
+            let r: redis::RedisResult<Vec<Vec<u8>>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            py_bytes_list(py, r.map_err(to_py_err)?)
+        }
+    }
+
+    #[pyo3(signature = (
+        destination,
+        source,
+        start,
+        stop,
+        *,
+        desc = false,
+        byscore = false,
+        bylex = false,
+        offset = None,
+        num = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn zrangestore(
+        &self,
+        py: Python<'_>,
+        destination: &str,
+        source: &str,
+        start: &Bound<'_, PyAny>,
+        stop: &Bound<'_, PyAny>,
+        desc: bool,
+        byscore: bool,
+        bylex: bool,
+        offset: Option<i64>,
+        num: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let start_s = pyany_to_zrange_arg(start)?;
+        let stop_s = pyany_to_zrange_arg(stop)?;
+        let cmd = build_zrange_cmd(
+            "ZRANGESTORE",
+            &[destination, source],
+            &start_s,
+            &stop_s,
+            byscore,
+            bylex,
+            desc,
+            offset,
+            num,
+            false,
+        )?;
+        let r: redis::RedisResult<i64> =
+            crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    // =====================================================================
+    // (c) ZRANGEBYSCORE / ZREVRANGEBYSCORE / ZRANGEBYLEX / ZREVRANGEBYLEX
+    // =====================================================================
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (key, min, max, *, withscores=false, offset=None, num=None))]
+    fn zrangebyscore(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        min: &str,
+        max: &str,
+        withscores: bool,
+        offset: Option<i64>,
+        num: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let cmd = build_simple_range_cmd("ZRANGEBYSCORE", key, min, max, withscores, offset, num)?;
+        if withscores {
+            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            render_scored_members(py, r.map_err(to_py_err)?)
+        } else {
+            let r: redis::RedisResult<Vec<Vec<u8>>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            py_bytes_list(py, r.map_err(to_py_err)?)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (key, max, min, *, withscores=false, offset=None, num=None))]
+    fn zrevrangebyscore(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        max: &str,
+        min: &str,
+        withscores: bool,
+        offset: Option<i64>,
+        num: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let cmd =
+            build_simple_range_cmd("ZREVRANGEBYSCORE", key, max, min, withscores, offset, num)?;
+        if withscores {
+            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            render_scored_members(py, r.map_err(to_py_err)?)
+        } else {
+            let r: redis::RedisResult<Vec<Vec<u8>>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            py_bytes_list(py, r.map_err(to_py_err)?)
+        }
+    }
+
+    #[pyo3(signature = (key, min, max, *, offset=None, num=None))]
+    fn zrangebylex(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        min: &str,
+        max: &str,
+        offset: Option<i64>,
+        num: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let cmd = build_simple_range_cmd("ZRANGEBYLEX", key, min, max, false, offset, num)?;
+        let r: redis::RedisResult<Vec<Vec<u8>>> =
+            crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        py_bytes_list(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, max, min, *, offset=None, num=None))]
+    fn zrevrangebylex(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        max: &str,
+        min: &str,
+        offset: Option<i64>,
+        num: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let cmd = build_simple_range_cmd("ZREVRANGEBYLEX", key, max, min, false, offset, num)?;
+        let r: redis::RedisResult<Vec<Vec<u8>>> =
+            crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        py_bytes_list(py, r.map_err(to_py_err)?)
+    }
+
+    // =====================================================================
+    // (d) ZINCRBY / ZCARD / ZSCORE / ZMSCORE
+    // =====================================================================
+
+    #[pyo3(signature = (key, amount, member))]
+    fn zincrby(&self, py: Python<'_>, key: &str, amount: f64, member: &[u8]) -> PyResult<f64> {
+        crate::sync_op!(py, self, conn, async {
+            conn_method!(&mut *conn, c, c.zincr(key, member, amount))
+        })
+        .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (key))]
+    fn zcard(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<i64> = crate::sync_op!(py, self, conn, async {
+            conn_method!(&mut *conn, c, c.zcard(key))
+        });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, member))]
+    fn zscore(&self, py: Python<'_>, key: &str, member: &[u8]) -> PyResult<Option<f64>> {
+        crate::sync_op!(py, self, conn, async {
+            conn_method!(&mut *conn, c, c.zscore(key, member))
+        })
+        .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (key, *members))]
+    fn zmscore(&self, py: Python<'_>, key: &str, members: Vec<Vec<u8>>) -> PyResult<Py<PyAny>> {
+        if members.is_empty() {
+            return Ok(PyList::empty(py).into_any().unbind());
+        }
+        let r: redis::RedisResult<Vec<Option<f64>>> = crate::sync_op!(py, self, conn, async {
+            let mut cmd = redis::cmd("ZMSCORE");
+            cmd.arg(key);
+            for m in &members {
+                cmd.arg(m.as_slice());
+            }
+            dispatch_cmd!(&mut *conn, cmd)
+        });
+        let items = r.map_err(to_py_err)?;
+        let py_items: Vec<Py<PyAny>> = items
+            .into_iter()
+            .map(|opt| match opt {
+                Some(f) => Ok(f.into_pyobject(py)?.into_any().unbind()),
+                None => Ok(py.None()),
+            })
+            .collect::<PyResult<_>>()?;
+        Ok(PyList::new(py, py_items)?.into_any().unbind())
+    }
+
+    // =====================================================================
+    // (e) ZRANK / ZREVRANK with WITHSCORE (Redis 7.2+)
+    // =====================================================================
+
+    #[pyo3(signature = (key, member, *, withscore=false))]
+    fn zrank(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        member: &[u8],
+        withscore: bool,
+    ) -> PyResult<Py<PyAny>> {
+        rank_impl_sync(py, self, "ZRANK", key, member, withscore)
+    }
+
+    #[pyo3(signature = (key, member, *, withscore=false))]
+    fn zrevrank(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        member: &[u8],
+        withscore: bool,
+    ) -> PyResult<Py<PyAny>> {
+        rank_impl_sync(py, self, "ZREVRANK", key, member, withscore)
+    }
+
+    // =====================================================================
+    // (f) ZREMRANGEBYRANK / ZREMRANGEBYSCORE / ZREMRANGEBYLEX
+    // =====================================================================
+
+    #[pyo3(signature = (key, start, stop))]
+    fn zremrangebyrank(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        start: i64,
+        stop: i64,
+    ) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<i64> = crate::sync_op!(py, self, conn, async {
+            conn_method!(
+                &mut *conn,
+                c,
+                c.zremrangebyrank(key, start as isize, stop as isize)
+            )
+        });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, min, max))]
+    fn zremrangebyscore(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        min: &str,
+        max: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<i64> = crate::sync_op!(py, self, conn, async {
+            let mut cmd = redis::cmd("ZREMRANGEBYSCORE");
+            cmd.arg(key).arg(min).arg(max);
+            dispatch_cmd!(&mut *conn, cmd)
+        });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, min, max))]
+    fn zremrangebylex(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        min: &str,
+        max: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<i64> = crate::sync_op!(py, self, conn, async {
+            let mut cmd = redis::cmd("ZREMRANGEBYLEX");
+            cmd.arg(key).arg(min).arg(max);
+            dispatch_cmd!(&mut *conn, cmd)
+        });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    // =====================================================================
+    // (g) ZCOUNT / ZLEXCOUNT
+    // =====================================================================
+
+    #[pyo3(signature = (key, min, max))]
+    fn zcount(&self, py: Python<'_>, key: &str, min: &str, max: &str) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<i64> = crate::sync_op!(py, self, conn, async {
+            let mut cmd = redis::cmd("ZCOUNT");
+            cmd.arg(key).arg(min).arg(max);
+            dispatch_cmd!(&mut *conn, cmd)
+        });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, min, max))]
+    fn zlexcount(&self, py: Python<'_>, key: &str, min: &str, max: &str) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<i64> = crate::sync_op!(py, self, conn, async {
+            let mut cmd = redis::cmd("ZLEXCOUNT");
+            cmd.arg(key).arg(min).arg(max);
+            dispatch_cmd!(&mut *conn, cmd)
+        });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    // =====================================================================
+    // (h) ZPOPMIN / ZPOPMAX / ZMPOP / BZPOPMIN / BZPOPMAX / BZMPOP
+    // =====================================================================
+
+    #[pyo3(signature = (key, *, count=1))]
+    fn zpopmin(&self, py: Python<'_>, key: &str, count: i64) -> PyResult<Py<PyAny>> {
+        let count = count as isize;
+        let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = crate::sync_op!(py, self, conn, async {
+            conn_method!(&mut *conn, c, c.zpopmin(key, count))
+        });
+        render_scored_members(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, *, count=1))]
+    fn zpopmax(&self, py: Python<'_>, key: &str, count: i64) -> PyResult<Py<PyAny>> {
+        let count = count as isize;
+        let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = crate::sync_op!(py, self, conn, async {
+            conn_method!(&mut *conn, c, c.zpopmax(key, count))
+        });
+        render_scored_members(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (*keys, direction, count=1))]
+    fn zmpop(
+        &self,
+        py: Python<'_>,
+        keys: Vec<String>,
+        direction: &str,
+        count: i64,
+    ) -> PyResult<Py<PyAny>> {
+        let direction = validate_zmpop_direction(direction)?;
+        let r: Result<redis::Value, _> = crate::sync_op!(py, self, conn, async {
+            let mut cmd = redis::cmd("ZMPOP");
+            cmd.arg(keys.len());
+            for k in &keys {
+                cmd.arg(k);
+            }
+            cmd.arg(direction).arg("COUNT").arg(count);
+            dispatch_cmd!(&mut *conn, cmd)
+        });
+        let value = r.map_err(to_py_err)?;
+        render_zmpop_reply(py, value)
+    }
+
+    #[pyo3(signature = (*keys, timeout))]
+    fn bzpopmin(&self, py: Python<'_>, keys: Vec<String>, timeout: f64) -> PyResult<Py<PyAny>> {
+        let r: Result<BZPopResult, _> = py.detach(|| {
+            crate::runtime::get_runtime().block_on(async {
+                let mut conn = self
+                    .connection
+                    .get_blocking()
+                    .await
+                    .map_err(|e| pyo3::exceptions::PyConnectionError::new_err(e.to_string()))?;
+                let mut cmd = redis::cmd("BZPOPMIN");
+                for k in &keys {
+                    cmd.arg(k);
+                }
+                cmd.arg(timeout);
+                let r: redis::RedisResult<BZPopResult> = dispatch_cmd!(&mut conn, cmd);
+                r.map_err(to_py_err)
+            })
+        });
+        render_bzpop_reply(py, r?)
+    }
+
+    #[pyo3(signature = (*keys, timeout))]
+    fn bzpopmax(&self, py: Python<'_>, keys: Vec<String>, timeout: f64) -> PyResult<Py<PyAny>> {
+        let r: Result<BZPopResult, _> = py.detach(|| {
+            crate::runtime::get_runtime().block_on(async {
+                let mut conn = self
+                    .connection
+                    .get_blocking()
+                    .await
+                    .map_err(|e| pyo3::exceptions::PyConnectionError::new_err(e.to_string()))?;
+                let mut cmd = redis::cmd("BZPOPMAX");
+                for k in &keys {
+                    cmd.arg(k);
+                }
+                cmd.arg(timeout);
+                let r: redis::RedisResult<BZPopResult> = dispatch_cmd!(&mut conn, cmd);
+                r.map_err(to_py_err)
+            })
+        });
+        render_bzpop_reply(py, r?)
+    }
+
+    #[pyo3(signature = (*keys, direction, timeout, count=1))]
+    fn bzmpop(
+        &self,
+        py: Python<'_>,
+        keys: Vec<String>,
+        direction: &str,
+        timeout: f64,
+        count: i64,
+    ) -> PyResult<Py<PyAny>> {
+        let direction = validate_zmpop_direction(direction)?;
+        let r: Result<redis::Value, _> = py.detach(|| {
+            crate::runtime::get_runtime().block_on(async {
+                let mut conn = self
+                    .connection
+                    .get_blocking()
+                    .await
+                    .map_err(|e| pyo3::exceptions::PyConnectionError::new_err(e.to_string()))?;
+                let mut cmd = redis::cmd("BZMPOP");
+                cmd.arg(timeout).arg(keys.len());
+                for k in &keys {
+                    cmd.arg(k);
+                }
+                cmd.arg(direction).arg("COUNT").arg(count);
+                let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut conn, cmd);
+                r.map_err(to_py_err)
+            })
+        });
+        render_zmpop_reply(py, r?)
+    }
+
+    // =====================================================================
+    // (i) ZRANDMEMBER
+    // =====================================================================
+
+    #[pyo3(signature = (key, count=None, withscores=false))]
+    fn zrandmember(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        count: Option<i64>,
+        withscores: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let r: Result<redis::Value, _> = crate::sync_op!(py, self, conn, async {
+            let mut cmd = redis::cmd("ZRANDMEMBER");
+            cmd.arg(key);
+            if let Some(c) = count {
+                cmd.arg(c);
+                if withscores {
+                    cmd.arg("WITHSCORES");
+                }
+            }
+            dispatch_cmd!(&mut *conn, cmd)
+        });
+        render_zrandmember(py, r.map_err(to_py_err)?, count, withscores)
+    }
+
+    // =====================================================================
+    // (j) ZSCAN
+    // =====================================================================
+
+    #[pyo3(signature = (key, *, cursor=0, r#match=None, count=None))]
+    #[allow(non_snake_case)]
+    fn zscan(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        cursor: u64,
+        r#match: Option<String>,
+        count: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let r: Result<redis::Value, _> = crate::sync_op!(py, self, conn, async {
+            let mut cmd = redis::cmd("ZSCAN");
+            cmd.arg(key).arg(cursor);
+            if let Some(ref p) = r#match {
+                cmd.arg("MATCH").arg(p);
+            }
+            if let Some(c) = count {
+                cmd.arg("COUNT").arg(c);
+            }
+            dispatch_cmd!(&mut *conn, cmd)
+        });
+        let value = r.map_err(to_py_err)?;
+        let (cursor_out, items) = parse_zscan_reply(value)?;
+        let cursor_py = cursor_out.into_pyobject(py)?.into_any().unbind();
+        let pairs: Vec<Py<PyAny>> = items
+            .into_iter()
+            .map(|(m, s)| {
+                let m_py = PyBytes::new(py, &m).into_any().unbind();
+                let s_py = s.into_pyobject(py)?.into_any().unbind();
+                Ok(PyTuple::new(py, [m_py, s_py])?.into_any().unbind())
+            })
+            .collect::<PyResult<_>>()?;
+        let list_py = PyList::new(py, pairs)?.into_any().unbind();
+        Ok(PyTuple::new(py, [cursor_py, list_py])?.into_any().unbind())
+    }
+
+    // =====================================================================
+    // (k) ZUNION / ZINTER / ZDIFF + STORE variants + ZINTERCARD
+    // =====================================================================
+
+    #[pyo3(signature = (*, keys, weights = None, aggregate = None, withscores = false))]
+    fn zunion(
+        &self,
+        py: Python<'_>,
+        keys: Vec<String>,
+        weights: Option<Vec<f64>>,
+        aggregate: Option<String>,
+        withscores: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
+        let cmd = build_zset_op_cmd("ZUNION", &[], &keys, &weights, agg, withscores);
+        if withscores {
+            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            render_scored_members(py, r.map_err(to_py_err)?)
+        } else {
+            let r: redis::RedisResult<Vec<Vec<u8>>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            py_bytes_list(py, r.map_err(to_py_err)?)
+        }
+    }
+
+    #[pyo3(signature = (*, keys, weights = None, aggregate = None, withscores = false))]
+    fn zinter(
+        &self,
+        py: Python<'_>,
+        keys: Vec<String>,
+        weights: Option<Vec<f64>>,
+        aggregate: Option<String>,
+        withscores: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
+        let cmd = build_zset_op_cmd("ZINTER", &[], &keys, &weights, agg, withscores);
+        if withscores {
+            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            render_scored_members(py, r.map_err(to_py_err)?)
+        } else {
+            let r: redis::RedisResult<Vec<Vec<u8>>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            py_bytes_list(py, r.map_err(to_py_err)?)
+        }
+    }
+
+    #[pyo3(signature = (*, keys, withscores = false))]
+    fn zdiff(&self, py: Python<'_>, keys: Vec<String>, withscores: bool) -> PyResult<Py<PyAny>> {
+        if keys.is_empty() {
+            return Err(PyErr::new::<DataError, _>(
+                "keys= must contain at least one key",
+            ));
+        }
+        let mut cmd = redis::cmd("ZDIFF");
+        cmd.arg(keys.len());
+        for k in &keys {
+            cmd.arg(k);
+        }
+        if withscores {
+            cmd.arg("WITHSCORES");
+        }
+        if withscores {
+            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            render_scored_members(py, r.map_err(to_py_err)?)
+        } else {
+            let r: redis::RedisResult<Vec<Vec<u8>>> =
+                crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+            py_bytes_list(py, r.map_err(to_py_err)?)
+        }
+    }
+
+    #[pyo3(signature = (destination, keys, weights = None, aggregate = None))]
+    fn zunionstore(
+        &self,
+        py: Python<'_>,
+        destination: &str,
+        keys: Vec<String>,
+        weights: Option<Vec<f64>>,
+        aggregate: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
+        let cmd = build_zset_op_cmd("ZUNIONSTORE", &[destination], &keys, &weights, agg, false);
+        let r: redis::RedisResult<i64> =
+            crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (destination, keys, weights = None, aggregate = None))]
+    fn zinterstore(
+        &self,
+        py: Python<'_>,
+        destination: &str,
+        keys: Vec<String>,
+        weights: Option<Vec<f64>>,
+        aggregate: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
+        let cmd = build_zset_op_cmd("ZINTERSTORE", &[destination], &keys, &weights, agg, false);
+        let r: redis::RedisResult<i64> =
+            crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (destination, keys))]
+    fn zdiffstore(
+        &self,
+        py: Python<'_>,
+        destination: &str,
+        keys: Vec<String>,
+    ) -> PyResult<Py<PyAny>> {
+        if keys.is_empty() {
+            return Err(PyErr::new::<DataError, _>(
+                "keys= must contain at least one key",
+            ));
+        }
+        let r: redis::RedisResult<i64> = crate::sync_op!(py, self, conn, async {
+            let mut cmd = redis::cmd("ZDIFFSTORE");
+            cmd.arg(destination).arg(keys.len());
+            for k in &keys {
+                cmd.arg(k);
+            }
+            dispatch_cmd!(&mut *conn, cmd)
+        });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (*, keys, limit = None))]
+    fn zintercard(
+        &self,
+        py: Python<'_>,
+        keys: Vec<String>,
+        limit: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        if keys.is_empty() {
+            return Err(PyErr::new::<DataError, _>(
+                "keys= must contain at least one key",
+            ));
+        }
+        let r: redis::RedisResult<i64> = crate::sync_op!(py, self, conn, async {
+            let mut cmd = redis::cmd("ZINTERCARD");
+            cmd.arg(keys.len());
+            for k in &keys {
+                cmd.arg(k);
+            }
+            if let Some(lim) = limit {
+                cmd.arg("LIMIT").arg(lim);
+            }
+            dispatch_cmd!(&mut *conn, cmd)
+        });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+}
+
+// =========================================================================
+// Async AsyncRedis methods
+// =========================================================================
+
+#[pymethods]
+impl AsyncRedis {
+    // =====================================================================
+    // (a) ZADD with full NX/XX/GT/LT/CH/INCR flag matrix
+    // =====================================================================
+
+    #[pyo3(signature = (
+        key,
         mapping,
         nx = false,
         xx = false,
@@ -692,7 +1396,7 @@ impl RedisRsDriver {
         incr = false,
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn azadd(
+    fn zadd(
         &self,
         py: Python<'_>,
         key: &str,
@@ -715,7 +1419,7 @@ impl RedisRsDriver {
         let pairs = collect_zadd_pairs(mapping)?;
         validate_zadd_flags(flags, pairs.len())?;
         let key = key.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let cmd = build_zadd_cmd(&key, &pairs, flags);
             if flags.incr {
                 let r: redis::RedisResult<Option<f64>> = dispatch_cmd!(&mut *conn, cmd);
@@ -736,19 +1440,8 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (key, *members))]
     fn zrem(&self, py: Python<'_>, key: &str, members: Vec<Vec<u8>>) -> PyResult<Py<PyAny>> {
-        if members.is_empty() {
-            return py_int(py, 0);
-        }
-        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
-            conn_method!(&mut *conn, c, c.zrem(key, &members))
-        });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, *members))]
-    fn azrem(&self, py: Python<'_>, key: &str, members: Vec<Vec<u8>>) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             if members.is_empty() {
                 return RawResult::Int(0);
             }
@@ -801,58 +1494,7 @@ impl RedisRsDriver {
             num,
             withscores,
         )?;
-        if withscores {
-            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
-        } else {
-            let r: redis::RedisResult<Vec<Vec<u8>>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
-        }
-    }
-
-    #[pyo3(signature = (
-        key,
-        start,
-        stop,
-        *,
-        desc = false,
-        byscore = false,
-        bylex = false,
-        withscores = false,
-        offset = None,
-        num = None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn azrange(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        start: &Bound<'_, PyAny>,
-        stop: &Bound<'_, PyAny>,
-        desc: bool,
-        byscore: bool,
-        bylex: bool,
-        withscores: bool,
-        offset: Option<i64>,
-        num: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let start_s = pyany_to_zrange_arg(start)?;
-        let stop_s = pyany_to_zrange_arg(stop)?;
-        let cmd = build_zrange_cmd(
-            "ZRANGE",
-            &[key],
-            &start_s,
-            &stop_s,
-            byscore,
-            bylex,
-            desc,
-            offset,
-            num,
-            withscores,
-        )?;
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             if withscores {
                 let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = dispatch_cmd!(&mut *conn, cmd);
                 r.into_raw_result()
@@ -903,52 +1545,7 @@ impl RedisRsDriver {
             num,
             false,
         )?;
-        let r: redis::RedisResult<i64> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (
-        destination,
-        source,
-        start,
-        stop,
-        *,
-        desc = false,
-        byscore = false,
-        bylex = false,
-        offset = None,
-        num = None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn azrangestore(
-        &self,
-        py: Python<'_>,
-        destination: &str,
-        source: &str,
-        start: &Bound<'_, PyAny>,
-        stop: &Bound<'_, PyAny>,
-        desc: bool,
-        byscore: bool,
-        bylex: bool,
-        offset: Option<i64>,
-        num: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let start_s = pyany_to_zrange_arg(start)?;
-        let stop_s = pyany_to_zrange_arg(stop)?;
-        let cmd = build_zrange_cmd(
-            "ZRANGESTORE",
-            &[destination, source],
-            &start_s,
-            &stop_s,
-            byscore,
-            bylex,
-            desc,
-            offset,
-            num,
-            false,
-        )?;
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
             r.into_raw_result()
         })
@@ -971,31 +1568,7 @@ impl RedisRsDriver {
         num: Option<i64>,
     ) -> PyResult<Py<PyAny>> {
         let cmd = build_simple_range_cmd("ZRANGEBYSCORE", key, min, max, withscores, offset, num)?;
-        if withscores {
-            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
-        } else {
-            let r: redis::RedisResult<Vec<Vec<u8>>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (key, min, max, *, withscores=false, offset=None, num=None))]
-    fn azrangebyscore(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        min: &str,
-        max: &str,
-        withscores: bool,
-        offset: Option<i64>,
-        num: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let cmd = build_simple_range_cmd("ZRANGEBYSCORE", key, min, max, withscores, offset, num)?;
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             if withscores {
                 let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = dispatch_cmd!(&mut *conn, cmd);
                 r.into_raw_result()
@@ -1020,32 +1593,7 @@ impl RedisRsDriver {
     ) -> PyResult<Py<PyAny>> {
         let cmd =
             build_simple_range_cmd("ZREVRANGEBYSCORE", key, max, min, withscores, offset, num)?;
-        if withscores {
-            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
-        } else {
-            let r: redis::RedisResult<Vec<Vec<u8>>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (key, max, min, *, withscores=false, offset=None, num=None))]
-    fn azrevrangebyscore(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        max: &str,
-        min: &str,
-        withscores: bool,
-        offset: Option<i64>,
-        num: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let cmd =
-            build_simple_range_cmd("ZREVRANGEBYSCORE", key, max, min, withscores, offset, num)?;
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             if withscores {
                 let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = dispatch_cmd!(&mut *conn, cmd);
                 r.into_raw_result()
@@ -1067,23 +1615,7 @@ impl RedisRsDriver {
         num: Option<i64>,
     ) -> PyResult<Py<PyAny>> {
         let cmd = build_simple_range_cmd("ZRANGEBYLEX", key, min, max, false, offset, num)?;
-        let r: redis::RedisResult<Vec<Vec<u8>>> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        py_bytes_list(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, min, max, *, offset=None, num=None))]
-    fn azrangebylex(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        min: &str,
-        max: &str,
-        offset: Option<i64>,
-        num: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let cmd = build_simple_range_cmd("ZRANGEBYLEX", key, min, max, false, offset, num)?;
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<Vec<Vec<u8>>> = dispatch_cmd!(&mut *conn, cmd);
             r.into_raw_result()
         })
@@ -1100,23 +1632,7 @@ impl RedisRsDriver {
         num: Option<i64>,
     ) -> PyResult<Py<PyAny>> {
         let cmd = build_simple_range_cmd("ZREVRANGEBYLEX", key, max, min, false, offset, num)?;
-        let r: redis::RedisResult<Vec<Vec<u8>>> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        py_bytes_list(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, max, min, *, offset=None, num=None))]
-    fn azrevrangebylex(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        max: &str,
-        min: &str,
-        offset: Option<i64>,
-        num: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let cmd = build_simple_range_cmd("ZREVRANGEBYLEX", key, max, min, false, offset, num)?;
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<Vec<Vec<u8>>> = dispatch_cmd!(&mut *conn, cmd);
             r.into_raw_result()
         })
@@ -1127,15 +1643,7 @@ impl RedisRsDriver {
     // =====================================================================
 
     #[pyo3(signature = (key, amount, member))]
-    fn zincrby(&self, py: Python<'_>, key: &str, amount: f64, member: &[u8]) -> PyResult<f64> {
-        sync_op!(py, self, conn, async {
-            conn_method!(&mut *conn, c, c.zincr(key, member, amount))
-        })
-        .map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (key, amount, member))]
-    fn azincrby(
+    fn zincrby(
         &self,
         py: Python<'_>,
         key: &str,
@@ -1144,7 +1652,7 @@ impl RedisRsDriver {
     ) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let member = member.to_vec();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<f64> =
                 conn_method!(&mut *conn, c, c.zincr(&key, &member, amount));
             r.into_raw_result()
@@ -1153,34 +1661,18 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (key))]
     fn zcard(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
-            conn_method!(&mut *conn, c, c.zcard(key))
-        });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key))]
-    fn azcard(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<i64> = conn_method!(&mut *conn, c, c.zcard(&key));
             r.into_raw_result()
         })
     }
 
     #[pyo3(signature = (key, member))]
-    fn zscore(&self, py: Python<'_>, key: &str, member: &[u8]) -> PyResult<Option<f64>> {
-        sync_op!(py, self, conn, async {
-            conn_method!(&mut *conn, c, c.zscore(key, member))
-        })
-        .map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (key, member))]
-    fn azscore(&self, py: Python<'_>, key: &str, member: &[u8]) -> PyResult<Py<PyAny>> {
+    fn zscore(&self, py: Python<'_>, key: &str, member: &[u8]) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let member = member.to_vec();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<Option<f64>> =
                 conn_method!(&mut *conn, c, c.zscore(&key, &member));
             r.into_raw_result()
@@ -1189,32 +1681,8 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (key, *members))]
     fn zmscore(&self, py: Python<'_>, key: &str, members: Vec<Vec<u8>>) -> PyResult<Py<PyAny>> {
-        if members.is_empty() {
-            return Ok(PyList::empty(py).into_any().unbind());
-        }
-        let r: redis::RedisResult<Vec<Option<f64>>> = sync_op!(py, self, conn, async {
-            let mut cmd = redis::cmd("ZMSCORE");
-            cmd.arg(key);
-            for m in &members {
-                cmd.arg(m.as_slice());
-            }
-            dispatch_cmd!(&mut *conn, cmd)
-        });
-        let items = r.map_err(to_py_err)?;
-        let py_items: Vec<Py<PyAny>> = items
-            .into_iter()
-            .map(|opt| match opt {
-                Some(f) => Ok(f.into_pyobject(py)?.into_any().unbind()),
-                None => Ok(py.None()),
-            })
-            .collect::<PyResult<_>>()?;
-        Ok(PyList::new(py, py_items)?.into_any().unbind())
-    }
-
-    #[pyo3(signature = (key, *members))]
-    fn azmscore(&self, py: Python<'_>, key: &str, members: Vec<Vec<u8>>) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             if members.is_empty() {
                 return RawResult::Value(redis::Value::Array(Vec::new()));
             }
@@ -1243,18 +1711,7 @@ impl RedisRsDriver {
         member: &[u8],
         withscore: bool,
     ) -> PyResult<Py<PyAny>> {
-        rank_impl(py, self, "ZRANK", key, member, withscore)
-    }
-
-    #[pyo3(signature = (key, member, *, withscore=false))]
-    fn azrank(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        member: &[u8],
-        withscore: bool,
-    ) -> PyResult<Py<PyAny>> {
-        arank_impl(py, self, "ZRANK", key, member, withscore)
+        rank_impl_async(py, self, "ZRANK", key, member, withscore)
     }
 
     #[pyo3(signature = (key, member, *, withscore=false))]
@@ -1265,18 +1722,7 @@ impl RedisRsDriver {
         member: &[u8],
         withscore: bool,
     ) -> PyResult<Py<PyAny>> {
-        rank_impl(py, self, "ZREVRANK", key, member, withscore)
-    }
-
-    #[pyo3(signature = (key, member, *, withscore=false))]
-    fn azrevrank(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        member: &[u8],
-        withscore: bool,
-    ) -> PyResult<Py<PyAny>> {
-        arank_impl(py, self, "ZREVRANK", key, member, withscore)
+        rank_impl_async(py, self, "ZREVRANK", key, member, withscore)
     }
 
     // =====================================================================
@@ -1291,26 +1737,8 @@ impl RedisRsDriver {
         start: i64,
         stop: i64,
     ) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
-            conn_method!(
-                &mut *conn,
-                c,
-                c.zremrangebyrank(key, start as isize, stop as isize)
-            )
-        });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, start, stop))]
-    fn azremrangebyrank(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        start: i64,
-        stop: i64,
-    ) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<i64> = conn_method!(
                 &mut *conn,
                 c,
@@ -1328,26 +1756,10 @@ impl RedisRsDriver {
         min: &str,
         max: &str,
     ) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
-            let mut cmd = redis::cmd("ZREMRANGEBYSCORE");
-            cmd.arg(key).arg(min).arg(max);
-            dispatch_cmd!(&mut *conn, cmd)
-        });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, min, max))]
-    fn azremrangebyscore(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        min: &str,
-        max: &str,
-    ) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let min = min.to_string();
         let max = max.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let mut cmd = redis::cmd("ZREMRANGEBYSCORE");
             cmd.arg(&key).arg(&min).arg(&max);
             let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
@@ -1363,26 +1775,10 @@ impl RedisRsDriver {
         min: &str,
         max: &str,
     ) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
-            let mut cmd = redis::cmd("ZREMRANGEBYLEX");
-            cmd.arg(key).arg(min).arg(max);
-            dispatch_cmd!(&mut *conn, cmd)
-        });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, min, max))]
-    fn azremrangebylex(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        min: &str,
-        max: &str,
-    ) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let min = min.to_string();
         let max = max.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let mut cmd = redis::cmd("ZREMRANGEBYLEX");
             cmd.arg(&key).arg(&min).arg(&max);
             let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
@@ -1396,20 +1792,10 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (key, min, max))]
     fn zcount(&self, py: Python<'_>, key: &str, min: &str, max: &str) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
-            let mut cmd = redis::cmd("ZCOUNT");
-            cmd.arg(key).arg(min).arg(max);
-            dispatch_cmd!(&mut *conn, cmd)
-        });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, min, max))]
-    fn azcount(&self, py: Python<'_>, key: &str, min: &str, max: &str) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let min = min.to_string();
         let max = max.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let mut cmd = redis::cmd("ZCOUNT");
             cmd.arg(&key).arg(&min).arg(&max);
             let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
@@ -1419,20 +1805,10 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (key, min, max))]
     fn zlexcount(&self, py: Python<'_>, key: &str, min: &str, max: &str) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
-            let mut cmd = redis::cmd("ZLEXCOUNT");
-            cmd.arg(key).arg(min).arg(max);
-            dispatch_cmd!(&mut *conn, cmd)
-        });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, min, max))]
-    fn azlexcount(&self, py: Python<'_>, key: &str, min: &str, max: &str) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let min = min.to_string();
         let max = max.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let mut cmd = redis::cmd("ZLEXCOUNT");
             cmd.arg(&key).arg(&min).arg(&max);
             let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
@@ -1446,18 +1822,9 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (key, *, count=1))]
     fn zpopmin(&self, py: Python<'_>, key: &str, count: i64) -> PyResult<Py<PyAny>> {
-        let count = count as isize;
-        let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = sync_op!(py, self, conn, async {
-            conn_method!(&mut *conn, c, c.zpopmin(key, count))
-        });
-        render_scored_members(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, *, count=1))]
-    fn azpopmin(&self, py: Python<'_>, key: &str, count: i64) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let count = count as isize;
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
                 conn_method!(&mut *conn, c, c.zpopmin(&key, count));
             r.into_raw_result()
@@ -1466,18 +1833,9 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (key, *, count=1))]
     fn zpopmax(&self, py: Python<'_>, key: &str, count: i64) -> PyResult<Py<PyAny>> {
-        let count = count as isize;
-        let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = sync_op!(py, self, conn, async {
-            conn_method!(&mut *conn, c, c.zpopmax(key, count))
-        });
-        render_scored_members(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, *, count=1))]
-    fn azpopmax(&self, py: Python<'_>, key: &str, count: i64) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let count = count as isize;
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
                 conn_method!(&mut *conn, c, c.zpopmax(&key, count));
             r.into_raw_result()
@@ -1493,29 +1851,7 @@ impl RedisRsDriver {
         count: i64,
     ) -> PyResult<Py<PyAny>> {
         let direction = validate_zmpop_direction(direction)?;
-        let r: Result<redis::Value, _> = sync_op!(py, self, conn, async {
-            let mut cmd = redis::cmd("ZMPOP");
-            cmd.arg(keys.len());
-            for k in &keys {
-                cmd.arg(k);
-            }
-            cmd.arg(direction).arg("COUNT").arg(count);
-            dispatch_cmd!(&mut *conn, cmd)
-        });
-        let value = r.map_err(to_py_err)?;
-        render_zmpop_reply(py, value)
-    }
-
-    #[pyo3(signature = (*keys, direction, count=1))]
-    fn azmpop(
-        &self,
-        py: Python<'_>,
-        keys: Vec<String>,
-        direction: &str,
-        count: i64,
-    ) -> PyResult<Py<PyAny>> {
-        let direction = validate_zmpop_direction(direction)?;
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let mut cmd = redis::cmd("ZMPOP");
             cmd.arg(keys.len());
             for k in &keys {
@@ -1532,27 +1868,6 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (*keys, timeout))]
     fn bzpopmin(&self, py: Python<'_>, keys: Vec<String>, timeout: f64) -> PyResult<Py<PyAny>> {
-        let r: Result<BZPopResult, _> = py.detach(|| {
-            crate::runtime::get_runtime().block_on(async {
-                let mut conn = self
-                    .connection
-                    .get_blocking()
-                    .await
-                    .map_err(|e| pyo3::exceptions::PyConnectionError::new_err(e.to_string()))?;
-                let mut cmd = redis::cmd("BZPOPMIN");
-                for k in &keys {
-                    cmd.arg(k);
-                }
-                cmd.arg(timeout);
-                let r: redis::RedisResult<BZPopResult> = dispatch_cmd!(&mut conn, cmd);
-                r.map_err(to_py_err)
-            })
-        });
-        render_bzpop_reply(py, r?)
-    }
-
-    #[pyo3(signature = (*keys, timeout))]
-    fn abzpopmin(&self, py: Python<'_>, keys: Vec<String>, timeout: f64) -> PyResult<Py<PyAny>> {
         let (tx, rx) = ::tokio::sync::oneshot::channel();
         let awaitable = crate::async_bridge::RedisRsAwaitable::new(rx);
         let conn_handle = self.connection.clone();
@@ -1581,27 +1896,6 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (*keys, timeout))]
     fn bzpopmax(&self, py: Python<'_>, keys: Vec<String>, timeout: f64) -> PyResult<Py<PyAny>> {
-        let r: Result<BZPopResult, _> = py.detach(|| {
-            crate::runtime::get_runtime().block_on(async {
-                let mut conn = self
-                    .connection
-                    .get_blocking()
-                    .await
-                    .map_err(|e| pyo3::exceptions::PyConnectionError::new_err(e.to_string()))?;
-                let mut cmd = redis::cmd("BZPOPMAX");
-                for k in &keys {
-                    cmd.arg(k);
-                }
-                cmd.arg(timeout);
-                let r: redis::RedisResult<BZPopResult> = dispatch_cmd!(&mut conn, cmd);
-                r.map_err(to_py_err)
-            })
-        });
-        render_bzpop_reply(py, r?)
-    }
-
-    #[pyo3(signature = (*keys, timeout))]
-    fn abzpopmax(&self, py: Python<'_>, keys: Vec<String>, timeout: f64) -> PyResult<Py<PyAny>> {
         let (tx, rx) = ::tokio::sync::oneshot::channel();
         let awaitable = crate::async_bridge::RedisRsAwaitable::new(rx);
         let conn_handle = self.connection.clone();
@@ -1630,36 +1924,6 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (*keys, direction, timeout, count=1))]
     fn bzmpop(
-        &self,
-        py: Python<'_>,
-        keys: Vec<String>,
-        direction: &str,
-        timeout: f64,
-        count: i64,
-    ) -> PyResult<Py<PyAny>> {
-        let direction = validate_zmpop_direction(direction)?;
-        let r: Result<redis::Value, _> = py.detach(|| {
-            crate::runtime::get_runtime().block_on(async {
-                let mut conn = self
-                    .connection
-                    .get_blocking()
-                    .await
-                    .map_err(|e| pyo3::exceptions::PyConnectionError::new_err(e.to_string()))?;
-                let mut cmd = redis::cmd("BZMPOP");
-                cmd.arg(timeout).arg(keys.len());
-                for k in &keys {
-                    cmd.arg(k);
-                }
-                cmd.arg(direction).arg("COUNT").arg(count);
-                let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut conn, cmd);
-                r.map_err(to_py_err)
-            })
-        });
-        render_zmpop_reply(py, r?)
-    }
-
-    #[pyo3(signature = (*keys, direction, timeout, count=1))]
-    fn abzmpop(
         &self,
         py: Python<'_>,
         keys: Vec<String>,
@@ -1707,28 +1971,6 @@ impl RedisRsDriver {
         count: Option<i64>,
         withscores: bool,
     ) -> PyResult<Py<PyAny>> {
-        let r: Result<redis::Value, _> = sync_op!(py, self, conn, async {
-            let mut cmd = redis::cmd("ZRANDMEMBER");
-            cmd.arg(key);
-            if let Some(c) = count {
-                cmd.arg(c);
-                if withscores {
-                    cmd.arg("WITHSCORES");
-                }
-            }
-            dispatch_cmd!(&mut *conn, cmd)
-        });
-        render_zrandmember(py, r.map_err(to_py_err)?, count, withscores)
-    }
-
-    #[pyo3(signature = (key, count=None, withscores=false))]
-    fn azrandmember(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        count: Option<i64>,
-        withscores: bool,
-    ) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let (tx, rx) = ::tokio::sync::oneshot::channel();
         let awaitable = crate::async_bridge::RedisRsAwaitable::new(rx);
@@ -1770,44 +2012,8 @@ impl RedisRsDriver {
         r#match: Option<String>,
         count: Option<i64>,
     ) -> PyResult<Py<PyAny>> {
-        let r: Result<redis::Value, _> = sync_op!(py, self, conn, async {
-            let mut cmd = redis::cmd("ZSCAN");
-            cmd.arg(key).arg(cursor);
-            if let Some(ref p) = r#match {
-                cmd.arg("MATCH").arg(p);
-            }
-            if let Some(c) = count {
-                cmd.arg("COUNT").arg(c);
-            }
-            dispatch_cmd!(&mut *conn, cmd)
-        });
-        let value = r.map_err(to_py_err)?;
-        let (cursor_out, items) = parse_zscan_reply(value)?;
-        let cursor_py = cursor_out.into_pyobject(py)?.into_any().unbind();
-        let pairs: Vec<Py<PyAny>> = items
-            .into_iter()
-            .map(|(m, s)| {
-                let m_py = PyBytes::new(py, &m).into_any().unbind();
-                let s_py = s.into_pyobject(py)?.into_any().unbind();
-                Ok(PyTuple::new(py, [m_py, s_py])?.into_any().unbind())
-            })
-            .collect::<PyResult<_>>()?;
-        let list_py = PyList::new(py, pairs)?.into_any().unbind();
-        Ok(PyTuple::new(py, [cursor_py, list_py])?.into_any().unbind())
-    }
-
-    #[pyo3(signature = (key, *, cursor=0, r#match=None, count=None))]
-    #[allow(non_snake_case)]
-    fn azscan(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        cursor: u64,
-        r#match: Option<String>,
-        count: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let mut cmd = redis::cmd("ZSCAN");
             cmd.arg(&key).arg(cursor);
             if let Some(ref p) = r#match {
@@ -1834,13 +2040,7 @@ impl RedisRsDriver {
     // (k) ZUNION / ZINTER / ZDIFF + STORE variants + ZINTERCARD
     // =====================================================================
 
-    #[pyo3(signature = (
-        *,
-        keys,
-        weights = None,
-        aggregate = None,
-        withscores = false,
-    ))]
+    #[pyo3(signature = (*, keys, weights = None, aggregate = None, withscores = false))]
     fn zunion(
         &self,
         py: Python<'_>,
@@ -1851,35 +2051,7 @@ impl RedisRsDriver {
     ) -> PyResult<Py<PyAny>> {
         let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
         let cmd = build_zset_op_cmd("ZUNION", &[], &keys, &weights, agg, withscores);
-        if withscores {
-            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
-        } else {
-            let r: redis::RedisResult<Vec<Vec<u8>>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
-        }
-    }
-
-    #[pyo3(signature = (
-        *,
-        keys,
-        weights = None,
-        aggregate = None,
-        withscores = false,
-    ))]
-    fn azunion(
-        &self,
-        py: Python<'_>,
-        keys: Vec<String>,
-        weights: Option<Vec<f64>>,
-        aggregate: Option<String>,
-        withscores: bool,
-    ) -> PyResult<Py<PyAny>> {
-        let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
-        let cmd = build_zset_op_cmd("ZUNION", &[], &keys, &weights, agg, withscores);
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             if withscores {
                 let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = dispatch_cmd!(&mut *conn, cmd);
                 r.into_raw_result()
@@ -1890,13 +2062,7 @@ impl RedisRsDriver {
         })
     }
 
-    #[pyo3(signature = (
-        *,
-        keys,
-        weights = None,
-        aggregate = None,
-        withscores = false,
-    ))]
+    #[pyo3(signature = (*, keys, weights = None, aggregate = None, withscores = false))]
     fn zinter(
         &self,
         py: Python<'_>,
@@ -1907,35 +2073,7 @@ impl RedisRsDriver {
     ) -> PyResult<Py<PyAny>> {
         let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
         let cmd = build_zset_op_cmd("ZINTER", &[], &keys, &weights, agg, withscores);
-        if withscores {
-            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
-        } else {
-            let r: redis::RedisResult<Vec<Vec<u8>>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
-        }
-    }
-
-    #[pyo3(signature = (
-        *,
-        keys,
-        weights = None,
-        aggregate = None,
-        withscores = false,
-    ))]
-    fn azinter(
-        &self,
-        py: Python<'_>,
-        keys: Vec<String>,
-        weights: Option<Vec<f64>>,
-        aggregate: Option<String>,
-        withscores: bool,
-    ) -> PyResult<Py<PyAny>> {
-        let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
-        let cmd = build_zset_op_cmd("ZINTER", &[], &keys, &weights, agg, withscores);
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             if withscores {
                 let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = dispatch_cmd!(&mut *conn, cmd);
                 r.into_raw_result()
@@ -1961,33 +2099,7 @@ impl RedisRsDriver {
         if withscores {
             cmd.arg("WITHSCORES");
         }
-        if withscores {
-            let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
-        } else {
-            let r: redis::RedisResult<Vec<Vec<u8>>> =
-                sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
-        }
-    }
-
-    #[pyo3(signature = (*, keys, withscores = false))]
-    fn azdiff(&self, py: Python<'_>, keys: Vec<String>, withscores: bool) -> PyResult<Py<PyAny>> {
-        if keys.is_empty() {
-            return Err(PyErr::new::<DataError, _>(
-                "keys= must contain at least one key",
-            ));
-        }
-        let mut cmd = redis::cmd("ZDIFF");
-        cmd.arg(keys.len());
-        for k in &keys {
-            cmd.arg(k);
-        }
-        if withscores {
-            cmd.arg("WITHSCORES");
-        }
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             if withscores {
                 let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = dispatch_cmd!(&mut *conn, cmd);
                 r.into_raw_result()
@@ -1998,13 +2110,7 @@ impl RedisRsDriver {
         })
     }
 
-    #[pyo3(signature = (
-        destination,
-        *,
-        keys,
-        weights = None,
-        aggregate = None,
-    ))]
+    #[pyo3(signature = (destination, keys, weights = None, aggregate = None))]
     fn zunionstore(
         &self,
         py: Python<'_>,
@@ -2015,41 +2121,13 @@ impl RedisRsDriver {
     ) -> PyResult<Py<PyAny>> {
         let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
         let cmd = build_zset_op_cmd("ZUNIONSTORE", &[destination], &keys, &weights, agg, false);
-        let r: redis::RedisResult<i64> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (
-        destination,
-        *,
-        keys,
-        weights = None,
-        aggregate = None,
-    ))]
-    fn azunionstore(
-        &self,
-        py: Python<'_>,
-        destination: &str,
-        keys: Vec<String>,
-        weights: Option<Vec<f64>>,
-        aggregate: Option<String>,
-    ) -> PyResult<Py<PyAny>> {
-        let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
-        let cmd = build_zset_op_cmd("ZUNIONSTORE", &[destination], &keys, &weights, agg, false);
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
             r.into_raw_result()
         })
     }
 
-    #[pyo3(signature = (
-        destination,
-        *,
-        keys,
-        weights = None,
-        aggregate = None,
-    ))]
+    #[pyo3(signature = (destination, keys, weights = None, aggregate = None))]
     fn zinterstore(
         &self,
         py: Python<'_>,
@@ -2060,66 +2138,21 @@ impl RedisRsDriver {
     ) -> PyResult<Py<PyAny>> {
         let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
         let cmd = build_zset_op_cmd("ZINTERSTORE", &[destination], &keys, &weights, agg, false);
-        let r: redis::RedisResult<i64> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (
-        destination,
-        *,
-        keys,
-        weights = None,
-        aggregate = None,
-    ))]
-    fn azinterstore(
-        &self,
-        py: Python<'_>,
-        destination: &str,
-        keys: Vec<String>,
-        weights: Option<Vec<f64>>,
-        aggregate: Option<String>,
-    ) -> PyResult<Py<PyAny>> {
-        let agg = validate_zset_op_args(&keys, &weights, &aggregate)?;
-        let cmd = build_zset_op_cmd("ZINTERSTORE", &[destination], &keys, &weights, agg, false);
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
             r.into_raw_result()
         })
     }
 
-    #[pyo3(signature = (destination, *, keys))]
+    #[pyo3(signature = (destination, keys))]
     fn zdiffstore(
         &self,
         py: Python<'_>,
         destination: &str,
         keys: Vec<String>,
     ) -> PyResult<Py<PyAny>> {
-        if keys.is_empty() {
-            return Err(PyErr::new::<DataError, _>(
-                "keys= must contain at least one key",
-            ));
-        }
-        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
-            let mut cmd = redis::cmd("ZDIFFSTORE");
-            cmd.arg(destination).arg(keys.len());
-            for k in &keys {
-                cmd.arg(k);
-            }
-            dispatch_cmd!(&mut *conn, cmd)
-        });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (destination, *, keys))]
-    fn azdiffstore(
-        &self,
-        py: Python<'_>,
-        destination: &str,
-        keys: Vec<String>,
-    ) -> PyResult<Py<PyAny>> {
         let destination = destination.to_string();
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             if keys.is_empty() {
                 return RawResult::Error(
                     ExceptionClass::DataError,
@@ -2143,33 +2176,7 @@ impl RedisRsDriver {
         keys: Vec<String>,
         limit: Option<i64>,
     ) -> PyResult<Py<PyAny>> {
-        if keys.is_empty() {
-            return Err(PyErr::new::<DataError, _>(
-                "keys= must contain at least one key",
-            ));
-        }
-        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
-            let mut cmd = redis::cmd("ZINTERCARD");
-            cmd.arg(keys.len());
-            for k in &keys {
-                cmd.arg(k);
-            }
-            if let Some(lim) = limit {
-                cmd.arg("LIMIT").arg(lim);
-            }
-            dispatch_cmd!(&mut *conn, cmd)
-        });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (*, keys, limit = None))]
-    fn azintercard(
-        &self,
-        py: Python<'_>,
-        keys: Vec<String>,
-        limit: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
+        crate::async_op!(self, py, conn, async {
             if keys.is_empty() {
                 return RawResult::Error(
                     ExceptionClass::DataError,

@@ -1,21 +1,20 @@
-// Stream commands for RedisRsDriver.
+// Stream commands.
 //
 // Architectural note: every command flattens the reply in Rust to match
 // redis-py's output shape exactly (see Plan 08, Architecture section).
-// The flatten_* helpers below are private to this file. New variants
-// of redis::Value coming from the server land in RawResult::Value and
-// the helpers in this file translate them to typed RawResult variants.
+// The flatten_* helpers below are private to this file.
 //
-// Argument-encoding helpers are extracted into `cmd_*` functions so the
-// sync and async halves share the same Cmd construction code verbatim.
+// Sync variants live in `#[pymethods] impl Redis`.
+// Async variants live in `#[pymethods] impl AsyncRedis` (a-prefix dropped).
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 use crate::async_bridge::RawResult;
-use crate::driver::RedisRsDriver;
 use crate::errors::{classify, to_py_err};
 use crate::exceptions::DataError;
+use crate::facade::asyncio_mod::AsyncRedis;
+use crate::facade::sync::Redis;
 use crate::raw_result::IntoRawResult;
 use crate::runtime::get_runtime;
 use crate::{async_op, dispatch_cmd, sync_op};
@@ -34,6 +33,60 @@ fn dict_to_stream_pairs(streams: &Bound<'_, PyDict>) -> PyResult<Vec<(String, St
         out.push((key, id));
     }
     Ok(out)
+}
+
+/// Coerce a Python value (str, bytes, int, float) to Vec<u8> for stream field values.
+fn coerce_field_value(v: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
+    if let Ok(b) = v.extract::<Vec<u8>>() {
+        return Ok(b);
+    }
+    if let Ok(s) = v.extract::<String>() {
+        return Ok(s.into_bytes());
+    }
+    if let Ok(n) = v.extract::<i64>() {
+        return Ok(n.to_string().into_bytes());
+    }
+    if let Ok(f) = v.extract::<f64>() {
+        return Ok(f.to_string().into_bytes());
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "stream field value must be str, bytes, int, or float",
+    ))
+}
+
+/// Parse stream fields from either:
+///   - dict[str, Any] → key=field-name, value=field-value
+///   - list/tuple of (str, Any) pairs
+fn parse_fields(obj: &Bound<'_, PyAny>) -> PyResult<Vec<(String, Vec<u8>)>> {
+    if let Ok(dict) = obj.cast::<PyDict>() {
+        let mut out = Vec::with_capacity(dict.len());
+        for (k, v) in dict.iter() {
+            let key: String = k.extract()?;
+            let val = coerce_field_value(&v)?;
+            out.push((key, val));
+        }
+        return Ok(out);
+    }
+    // Assume iterable of (key, value) pairs
+    let seq: Vec<(String, Bound<'_, PyAny>)> = obj
+        .try_iter()?
+        .map(|item| {
+            let item = item?;
+            let (k, v): (String, Bound<'_, PyAny>) = if let Ok(t) = item.cast::<PyTuple>() {
+                (t.get_item(0)?.extract()?, t.get_item(1)?)
+            } else if let Ok(l) = item.cast::<PyList>() {
+                (l.get_item(0)?.extract()?, l.get_item(1)?)
+            } else {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "each field entry must be a (key, value) tuple or list",
+                ));
+            };
+            Ok((k, v))
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    seq.into_iter()
+        .map(|(k, v)| Ok((k, coerce_field_value(&v)?)))
+        .collect()
 }
 
 // =========================================================================
@@ -402,14 +455,6 @@ fn pairs_from_flat(flat: Vec<redis::Value>) -> Vec<(Vec<u8>, Vec<u8>)> {
 }
 
 /// Flatten an XRANGE/XREVRANGE/XCLAIM reply.
-///
-/// Input shape (RESP2 + RESP3):
-///   Array(vec![
-///     Array(vec![BulkString(id), Array(vec![field1, value1, field2, value2, ...])]),
-///     ...
-///   ])
-///
-/// Output: `Vec<(id_bytes, Vec<(field_bytes, value_bytes)>)>`
 #[allow(clippy::type_complexity)]
 fn flatten_xrange_reply(value: redis::Value) -> Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)> {
     let entries = match value {
@@ -446,10 +491,6 @@ fn flatten_xrange_reply(value: redis::Value) -> Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<
 }
 
 /// Flatten an XREAD/XREADGROUP reply.
-///
-/// RESP2 shape: Array of (key, entries) arrays.
-/// RESP3 shape: Map keyed by stream key.
-/// On BLOCK timeout: Nil or empty map → empty Vec → Python None.
 #[allow(clippy::type_complexity)]
 fn flatten_xread_reply(
     value: redis::Value,
@@ -469,7 +510,6 @@ fn flatten_xread_reply(
             out
         }
         redis::Value::Array(streams) => {
-            // Handle empty array (RESP3 block timeout may return empty array)
             if streams.is_empty() {
                 return Vec::new();
             }
@@ -632,16 +672,26 @@ fn split_xautoclaim_reply(value: redis::Value) -> (Vec<u8>, redis::Value, Vec<Ve
 }
 
 // =========================================================================
-// RedisRsDriver method impls
+// Sync impl (Redis)
 // =========================================================================
 
 #[pymethods]
-impl RedisRsDriver {
+impl Redis {
     // ----- XADD -----
 
+    /// XADD — accepts two call styles matching redis-py:
+    ///   `xadd(key, id, fields)` — explicit entry-ID (old style, used by driver tests)
+    ///   `xadd(key, fields, id="*")` — redis-py compatible, where `fields` is
+    ///       a `dict[str, Any]` or list of `(str, Any)` pairs (new facade style)
+    ///
+    /// Disambiguation: if the second positional arg (`id_or_fields`) is a str we
+    /// treat it as an explicit ID and require the third positional arg as fields.
+    /// If it is a dict / list we treat it as the fields and use the keyword `id`
+    /// (default `"*"`).
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
-        key, id, fields, *,
+        key, id_or_fields, fields = None, *,
+        id = "*",
         nomkstream = false,
         maxlen = None,
         minid = None,
@@ -652,18 +702,32 @@ impl RedisRsDriver {
         &self,
         py: Python<'_>,
         key: &str,
+        id_or_fields: Bound<'_, PyAny>,
+        fields: Option<Bound<'_, PyAny>>,
         id: &str,
-        fields: Vec<(String, Vec<u8>)>,
         nomkstream: bool,
         maxlen: Option<i64>,
         minid: Option<String>,
         approximate: bool,
         limit: Option<i64>,
     ) -> PyResult<Option<String>> {
+        // Resolve (entry_id, fields_vec)
+        let (entry_id, fields_vec) = if let Ok(s) = id_or_fields.extract::<String>() {
+            // Old style: xadd(key, id_str, fields_list)
+            let f = fields.ok_or_else(|| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "xadd(key, id, fields): 'fields' is required when second arg is a string",
+                )
+            })?;
+            (s, parse_fields(&f)?)
+        } else {
+            // New style: xadd(key, fields_dict_or_list, *, id="*")
+            (id.to_string(), parse_fields(&id_or_fields)?)
+        };
         let cmd = cmd_xadd(
             key,
-            id,
-            &fields,
+            &entry_id,
+            &fields_vec,
             nomkstream,
             maxlen,
             minid.as_deref(),
@@ -675,48 +739,6 @@ impl RedisRsDriver {
         r.map_err(to_py_err)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (
-        key, id, fields, *,
-        nomkstream = false,
-        maxlen = None,
-        minid = None,
-        approximate = true,
-        limit = None,
-    ))]
-    fn axadd(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        id: &str,
-        fields: Vec<(String, Vec<u8>)>,
-        nomkstream: bool,
-        maxlen: Option<i64>,
-        minid: Option<String>,
-        approximate: bool,
-        limit: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let id = id.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xadd(
-                &key,
-                &id,
-                &fields,
-                nomkstream,
-                maxlen,
-                minid.as_deref(),
-                approximate,
-                limit,
-            );
-            let r: redis::RedisResult<Option<String>> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(opt) => RawResult::OptStr(opt),
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     // ----- XLEN -----
 
     #[pyo3(signature = (key))]
@@ -725,16 +747,6 @@ impl RedisRsDriver {
         let r: redis::RedisResult<i64> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         r.map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (key))]
-    fn axlen(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xlen(&key);
-            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
     }
 
     // ----- XDEL -----
@@ -750,19 +762,6 @@ impl RedisRsDriver {
         r.map_err(to_py_err)
     }
 
-    #[pyo3(signature = (key, *ids))]
-    fn axdel(&self, py: Python<'_>, key: &str, ids: Vec<String>) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            if ids.is_empty() {
-                return RawResult::Int(0);
-            }
-            let cmd = cmd_xdel(&key, &ids);
-            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
-    }
-
     // ----- XACK -----
 
     #[pyo3(signature = (key, group, *ids))]
@@ -776,29 +775,9 @@ impl RedisRsDriver {
         r.map_err(to_py_err)
     }
 
-    #[pyo3(signature = (key, group, *ids))]
-    fn axack(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        group: &str,
-        ids: Vec<String>,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let group = group.to_string();
-        async_op!(self, py, conn, async {
-            if ids.is_empty() {
-                return RawResult::Int(0);
-            }
-            let cmd = cmd_xack(&key, &group, &ids);
-            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
-    }
-
     // ----- XRANGE -----
 
-    #[pyo3(signature = (key, min, max, *, count = None))]
+    #[pyo3(signature = (key, min = "-", max = "+", *, count = None))]
     fn xrange(
         &self,
         py: Python<'_>,
@@ -814,31 +793,9 @@ impl RedisRsDriver {
         RawResult::StreamEntries(entries).into_py(py)
     }
 
-    #[pyo3(signature = (key, min, max, *, count = None))]
-    fn axrange(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        min: &str,
-        max: &str,
-        count: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let min = min.to_string();
-        let max = max.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xrange(&key, &min, &max, count);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => RawResult::StreamEntries(flatten_xrange_reply(v)),
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     // ----- XREVRANGE -----
 
-    #[pyo3(signature = (key, max, min, *, count = None))]
+    #[pyo3(signature = (key, max = "+", min = "-", *, count = None))]
     fn xrevrange(
         &self,
         py: Python<'_>,
@@ -852,28 +809,6 @@ impl RedisRsDriver {
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         let entries = flatten_xrange_reply(r.map_err(to_py_err)?);
         RawResult::StreamEntries(entries).into_py(py)
-    }
-
-    #[pyo3(signature = (key, max, min, *, count = None))]
-    fn axrevrange(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        max: &str,
-        min: &str,
-        count: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let max = max.to_string();
-        let min = min.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xrevrange(&key, &max, &min, count);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => RawResult::StreamEntries(flatten_xrange_reply(v)),
-                Err(e) => classify(e),
-            }
-        })
     }
 
     // ----- XREAD -----
@@ -901,32 +836,6 @@ impl RedisRsDriver {
         });
         let entries = flatten_xread_reply(r.map_err(to_py_err)?);
         RawResult::StreamReadEntries(entries).into_py(py)
-    }
-
-    #[pyo3(signature = (streams, *, count = None, block = None))]
-    fn axread(
-        &self,
-        py: Python<'_>,
-        streams: &Bound<'_, PyDict>,
-        count: Option<i64>,
-        block: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let streams = dict_to_stream_pairs(streams)?;
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xread(&streams, count, block);
-            let r: redis::RedisResult<redis::Value> = if block.is_some() {
-                match conn.get_blocking().await {
-                    Ok(mut blocking_inner) => dispatch_cmd!(&mut blocking_inner, cmd),
-                    Err(e) => Err(e),
-                }
-            } else {
-                dispatch_cmd!(&mut *conn, cmd)
-            };
-            match r {
-                Ok(v) => RawResult::StreamReadEntries(flatten_xread_reply(v)),
-                Err(e) => classify(e),
-            }
-        })
     }
 
     // ----- XREADGROUP -----
@@ -960,41 +869,9 @@ impl RedisRsDriver {
         RawResult::StreamReadEntries(entries).into_py(py)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (group, consumer, streams, *, count = None, block = None, noack = false))]
-    fn axreadgroup(
-        &self,
-        py: Python<'_>,
-        group: &str,
-        consumer: &str,
-        streams: &Bound<'_, PyDict>,
-        count: Option<i64>,
-        block: Option<i64>,
-        noack: bool,
-    ) -> PyResult<Py<PyAny>> {
-        let group = group.to_string();
-        let consumer = consumer.to_string();
-        let streams = dict_to_stream_pairs(streams)?;
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xreadgroup(&group, &consumer, &streams, count, block, noack);
-            let r: redis::RedisResult<redis::Value> = if block.is_some() {
-                match conn.get_blocking().await {
-                    Ok(mut blocking_inner) => dispatch_cmd!(&mut blocking_inner, cmd),
-                    Err(e) => Err(e),
-                }
-            } else {
-                dispatch_cmd!(&mut *conn, cmd)
-            };
-            match r {
-                Ok(v) => RawResult::StreamReadEntries(flatten_xread_reply(v)),
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     // ----- XGROUP CREATE -----
 
-    #[pyo3(signature = (key, group, *, id = "0", mkstream = false, entries_read = None))]
+    #[pyo3(signature = (key, group, id = "0", *, mkstream = false, entries_read = None))]
     fn xgroup_create(
         &self,
         py: Python<'_>,
@@ -1008,29 +885,6 @@ impl RedisRsDriver {
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         r.map(|_| ()).map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (key, group, *, id = "0", mkstream = false, entries_read = None))]
-    fn axgroup_create(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        group: &str,
-        id: &str,
-        mkstream: bool,
-        entries_read: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let group = group.to_string();
-        let id = id.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xgroup_create(&key, &group, &id, mkstream, entries_read);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(_) => RawResult::Nil,
-                Err(e) => classify(e),
-            }
-        })
     }
 
     // ----- XGROUP SETID -----
@@ -1050,28 +904,6 @@ impl RedisRsDriver {
         r.map(|_| ()).map_err(to_py_err)
     }
 
-    #[pyo3(signature = (key, group, *, id, entries_read = None))]
-    fn axgroup_setid(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        group: &str,
-        id: &str,
-        entries_read: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let group = group.to_string();
-        let id = id.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xgroup_setid(&key, &group, &id, entries_read);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(_) => RawResult::Nil,
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     // ----- XGROUP DESTROY -----
 
     fn xgroup_destroy(&self, py: Python<'_>, key: &str, group: &str) -> PyResult<i64> {
@@ -1079,16 +911,6 @@ impl RedisRsDriver {
         let r: redis::RedisResult<i64> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         r.map_err(to_py_err)
-    }
-
-    fn axgroup_destroy(&self, py: Python<'_>, key: &str, group: &str) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let group = group.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xgroup_destroy(&key, &group);
-            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
     }
 
     // ----- XGROUP CREATECONSUMER -----
@@ -1106,23 +928,6 @@ impl RedisRsDriver {
         r.map_err(to_py_err)
     }
 
-    fn axgroup_createconsumer(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        group: &str,
-        consumer: &str,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let group = group.to_string();
-        let consumer = consumer.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xgroup_createconsumer(&key, &group, &consumer);
-            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
-    }
-
     // ----- XGROUP DELCONSUMER -----
 
     fn xgroup_delconsumer(
@@ -1138,23 +943,6 @@ impl RedisRsDriver {
         r.map_err(to_py_err)
     }
 
-    fn axgroup_delconsumer(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        group: &str,
-        consumer: &str,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let group = group.to_string();
-        let consumer = consumer.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xgroup_delconsumer(&key, &group, &consumer);
-            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
-    }
-
     // ----- XINFO STREAM -----
 
     #[pyo3(signature = (key, *, full = false))]
@@ -1166,19 +954,6 @@ impl RedisRsDriver {
         RawResult::StreamInfoStream(pairs).into_py(py)
     }
 
-    #[pyo3(signature = (key, *, full = false))]
-    fn axinfo_stream(&self, py: Python<'_>, key: &str, full: bool) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xinfo_stream(&key, full);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => RawResult::StreamInfoStream(flatten_xinfo_stream(v)),
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     // ----- XINFO GROUPS -----
 
     fn xinfo_groups(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
@@ -1188,18 +963,6 @@ impl RedisRsDriver {
         RawResult::StreamInfoGroups(flatten_xinfo_list(r.map_err(to_py_err)?)).into_py(py)
     }
 
-    fn axinfo_groups(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xinfo_groups(&key);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => RawResult::StreamInfoGroups(flatten_xinfo_list(v)),
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     // ----- XINFO CONSUMERS -----
 
     fn xinfo_consumers(&self, py: Python<'_>, key: &str, group: &str) -> PyResult<Py<PyAny>> {
@@ -1207,19 +970,6 @@ impl RedisRsDriver {
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         RawResult::StreamInfoConsumers(flatten_xinfo_list(r.map_err(to_py_err)?)).into_py(py)
-    }
-
-    fn axinfo_consumers(&self, py: Python<'_>, key: &str, group: &str) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let group = group.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_xinfo_consumers(&key, &group);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => RawResult::StreamInfoConsumers(flatten_xinfo_list(v)),
-                Err(e) => classify(e),
-            }
-        })
     }
 
     // ----- XTRIM -----
@@ -1239,25 +989,6 @@ impl RedisRsDriver {
         let r: redis::RedisResult<i64> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         r.map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (key, *, maxlen = None, minid = None, approximate = true, limit = None))]
-    fn axtrim(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        maxlen: Option<i64>,
-        minid: Option<String>,
-        approximate: bool,
-        limit: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let cmd = cmd_xtrim(&key, maxlen, minid.as_deref(), approximate, limit)
-            .ok_or_else(|| PyErr::new::<DataError, _>("xtrim requires maxlen or minid"))?;
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
     }
 
     // ----- XPENDING -----
@@ -1299,52 +1030,6 @@ impl RedisRsDriver {
         } else {
             RawResult::StreamPendingSummary(flatten_xpending_summary(value)).into_py(py)
         }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (
-        key, group, *,
-        idle = None,
-        min = None,
-        max = None,
-        count = None,
-        consumer = None,
-    ))]
-    fn axpending(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        group: &str,
-        idle: Option<i64>,
-        min: Option<String>,
-        max: Option<String>,
-        count: Option<i64>,
-        consumer: Option<String>,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let group = group.to_string();
-        let is_range = min.is_some() || max.is_some() || count.is_some();
-        async_op!(self, py, conn, async {
-            let cmd = if is_range {
-                let min_s: String = min.unwrap_or_else(|| "-".to_string());
-                let max_s: String = max.unwrap_or_else(|| "+".to_string());
-                let cnt = count.unwrap_or(10);
-                cmd_xpending_range(&key, &group, idle, &min_s, &max_s, cnt, consumer.as_deref())
-            } else {
-                cmd_xpending_summary(&key, &group)
-            };
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => {
-                    if is_range {
-                        RawResult::StreamPendingRange(flatten_xpending_range(v))
-                    } else {
-                        RawResult::StreamPendingSummary(flatten_xpending_summary(v))
-                    }
-                }
-                Err(e) => classify(e),
-            }
-        })
     }
 
     // ----- XCLAIM -----
@@ -1403,6 +1088,505 @@ impl RedisRsDriver {
         }
     }
 
+    // ----- XAUTOCLAIM -----
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        key, group, consumer, *,
+        min_idle_time,
+        start_id = "0-0",
+        count = 100,
+        justid = false,
+    ))]
+    fn xautoclaim(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        group: &str,
+        consumer: &str,
+        min_idle_time: i64,
+        start_id: &str,
+        count: i64,
+        justid: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_xautoclaim(
+            key,
+            group,
+            consumer,
+            min_idle_time,
+            start_id,
+            Some(count),
+            justid,
+        );
+        let r: redis::RedisResult<redis::Value> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        let (next_id, middle, deleted) = split_xautoclaim_reply(r.map_err(to_py_err)?);
+        if justid {
+            let ids = match middle {
+                redis::Value::Array(items) => {
+                    items.into_iter().filter_map(value_to_bytes).collect()
+                }
+                _ => Vec::new(),
+            };
+            RawResult::StreamAutoclaimJustIds((next_id, ids, deleted)).into_py(py)
+        } else {
+            let entries = flatten_xrange_reply(middle);
+            RawResult::StreamAutoclaim((next_id, entries, deleted)).into_py(py)
+        }
+    }
+
+    // ----- XSETID -----
+
+    #[pyo3(signature = (key, id, *, entries_added = None, max_deleted_entry_id = None))]
+    fn xsetid(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        id: &str,
+        entries_added: Option<i64>,
+        max_deleted_entry_id: Option<String>,
+    ) -> PyResult<()> {
+        let cmd = cmd_xsetid(key, id, entries_added, max_deleted_entry_id.as_deref());
+        let r: redis::RedisResult<redis::Value> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        r.map(|_| ()).map_err(to_py_err)
+    }
+}
+
+// =========================================================================
+// Async impl (AsyncRedis)
+// =========================================================================
+
+#[pymethods]
+impl AsyncRedis {
+    // ----- XADD -----
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        key, id_or_fields, fields = None, *,
+        id = "*",
+        nomkstream = false,
+        maxlen = None,
+        minid = None,
+        approximate = true,
+        limit = None,
+    ))]
+    fn xadd(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        id_or_fields: Bound<'_, PyAny>,
+        fields: Option<Bound<'_, PyAny>>,
+        id: &str,
+        nomkstream: bool,
+        maxlen: Option<i64>,
+        minid: Option<String>,
+        approximate: bool,
+        limit: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let (entry_id, fields_vec) = if let Ok(s) = id_or_fields.extract::<String>() {
+            let f = fields.ok_or_else(|| {
+                pyo3::exceptions::PyTypeError::new_err(
+                    "xadd(key, id, fields): 'fields' is required when second arg is a string",
+                )
+            })?;
+            (s, parse_fields(&f)?)
+        } else {
+            (id.to_string(), parse_fields(&id_or_fields)?)
+        };
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xadd(
+                &key,
+                &entry_id,
+                &fields_vec,
+                nomkstream,
+                maxlen,
+                minid.as_deref(),
+                approximate,
+                limit,
+            );
+            let r: redis::RedisResult<Option<String>> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(opt) => RawResult::OptStr(opt),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XLEN -----
+
+    #[pyo3(signature = (key))]
+    fn xlen(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xlen(&key);
+            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    // ----- XDEL -----
+
+    #[pyo3(signature = (key, *ids))]
+    fn xdel(&self, py: Python<'_>, key: &str, ids: Vec<String>) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            if ids.is_empty() {
+                return RawResult::Int(0);
+            }
+            let cmd = cmd_xdel(&key, &ids);
+            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    // ----- XACK -----
+
+    #[pyo3(signature = (key, group, *ids))]
+    fn xack(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        group: &str,
+        ids: Vec<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let group = group.to_string();
+        async_op!(self, py, conn, async {
+            if ids.is_empty() {
+                return RawResult::Int(0);
+            }
+            let cmd = cmd_xack(&key, &group, &ids);
+            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    // ----- XRANGE -----
+
+    #[pyo3(signature = (key, min = "-", max = "+", *, count = None))]
+    fn xrange(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        min: &str,
+        max: &str,
+        count: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let min = min.to_string();
+        let max = max.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xrange(&key, &min, &max, count);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => RawResult::StreamEntries(flatten_xrange_reply(v)),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XREVRANGE -----
+
+    #[pyo3(signature = (key, max = "+", min = "-", *, count = None))]
+    fn xrevrange(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        max: &str,
+        min: &str,
+        count: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let max = max.to_string();
+        let min = min.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xrevrange(&key, &max, &min, count);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => RawResult::StreamEntries(flatten_xrange_reply(v)),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XREAD -----
+
+    #[pyo3(signature = (streams, *, count = None, block = None))]
+    fn xread(
+        &self,
+        py: Python<'_>,
+        streams: &Bound<'_, PyDict>,
+        count: Option<i64>,
+        block: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let streams = dict_to_stream_pairs(streams)?;
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xread(&streams, count, block);
+            let r: redis::RedisResult<redis::Value> = if block.is_some() {
+                match conn.get_blocking().await {
+                    Ok(mut blocking_inner) => dispatch_cmd!(&mut blocking_inner, cmd),
+                    Err(e) => Err(e),
+                }
+            } else {
+                dispatch_cmd!(&mut *conn, cmd)
+            };
+            match r {
+                Ok(v) => RawResult::StreamReadEntries(flatten_xread_reply(v)),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XREADGROUP -----
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (group, consumer, streams, *, count = None, block = None, noack = false))]
+    fn xreadgroup(
+        &self,
+        py: Python<'_>,
+        group: &str,
+        consumer: &str,
+        streams: &Bound<'_, PyDict>,
+        count: Option<i64>,
+        block: Option<i64>,
+        noack: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let group = group.to_string();
+        let consumer = consumer.to_string();
+        let streams = dict_to_stream_pairs(streams)?;
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xreadgroup(&group, &consumer, &streams, count, block, noack);
+            let r: redis::RedisResult<redis::Value> = if block.is_some() {
+                match conn.get_blocking().await {
+                    Ok(mut blocking_inner) => dispatch_cmd!(&mut blocking_inner, cmd),
+                    Err(e) => Err(e),
+                }
+            } else {
+                dispatch_cmd!(&mut *conn, cmd)
+            };
+            match r {
+                Ok(v) => RawResult::StreamReadEntries(flatten_xread_reply(v)),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XGROUP CREATE -----
+
+    #[pyo3(signature = (key, group, id = "0", *, mkstream = false, entries_read = None))]
+    fn xgroup_create(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        group: &str,
+        id: &str,
+        mkstream: bool,
+        entries_read: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let group = group.to_string();
+        let id = id.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xgroup_create(&key, &group, &id, mkstream, entries_read);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(_) => RawResult::Nil,
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XGROUP SETID -----
+
+    #[pyo3(signature = (key, group, *, id, entries_read = None))]
+    fn xgroup_setid(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        group: &str,
+        id: &str,
+        entries_read: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let group = group.to_string();
+        let id = id.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xgroup_setid(&key, &group, &id, entries_read);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(_) => RawResult::Nil,
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XGROUP DESTROY -----
+
+    fn xgroup_destroy(&self, py: Python<'_>, key: &str, group: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let group = group.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xgroup_destroy(&key, &group);
+            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    // ----- XGROUP CREATECONSUMER -----
+
+    fn xgroup_createconsumer(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        group: &str,
+        consumer: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let group = group.to_string();
+        let consumer = consumer.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xgroup_createconsumer(&key, &group, &consumer);
+            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    // ----- XGROUP DELCONSUMER -----
+
+    fn xgroup_delconsumer(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        group: &str,
+        consumer: &str,
+    ) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let group = group.to_string();
+        let consumer = consumer.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xgroup_delconsumer(&key, &group, &consumer);
+            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    // ----- XINFO STREAM -----
+
+    #[pyo3(signature = (key, *, full = false))]
+    fn xinfo_stream(&self, py: Python<'_>, key: &str, full: bool) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xinfo_stream(&key, full);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => RawResult::StreamInfoStream(flatten_xinfo_stream(v)),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XINFO GROUPS -----
+
+    fn xinfo_groups(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xinfo_groups(&key);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => RawResult::StreamInfoGroups(flatten_xinfo_list(v)),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XINFO CONSUMERS -----
+
+    fn xinfo_consumers(&self, py: Python<'_>, key: &str, group: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let group = group.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_xinfo_consumers(&key, &group);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => RawResult::StreamInfoConsumers(flatten_xinfo_list(v)),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XTRIM -----
+
+    #[pyo3(signature = (key, *, maxlen = None, minid = None, approximate = true, limit = None))]
+    fn xtrim(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        maxlen: Option<i64>,
+        minid: Option<String>,
+        approximate: bool,
+        limit: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let cmd = cmd_xtrim(&key, maxlen, minid.as_deref(), approximate, limit)
+            .ok_or_else(|| PyErr::new::<DataError, _>("xtrim requires maxlen or minid"))?;
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    // ----- XPENDING -----
+
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (
+        key, group, *,
+        idle = None,
+        min = None,
+        max = None,
+        count = None,
+        consumer = None,
+    ))]
+    fn xpending(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        group: &str,
+        idle: Option<i64>,
+        min: Option<String>,
+        max: Option<String>,
+        count: Option<i64>,
+        consumer: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let group = group.to_string();
+        let is_range = min.is_some() || max.is_some() || count.is_some();
+        async_op!(self, py, conn, async {
+            let cmd = if is_range {
+                let min_s: String = min.unwrap_or_else(|| "-".to_string());
+                let max_s: String = max.unwrap_or_else(|| "+".to_string());
+                let cnt = count.unwrap_or(10);
+                cmd_xpending_range(&key, &group, idle, &min_s, &max_s, cnt, consumer.as_deref())
+            } else {
+                cmd_xpending_summary(&key, &group)
+            };
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => {
+                    if is_range {
+                        RawResult::StreamPendingRange(flatten_xpending_range(v))
+                    } else {
+                        RawResult::StreamPendingSummary(flatten_xpending_summary(v))
+                    }
+                }
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // ----- XCLAIM -----
+
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         key, group, consumer, *,
@@ -1414,7 +1598,7 @@ impl RedisRsDriver {
         force = false,
         justid = false,
     ))]
-    fn axclaim(
+    fn xclaim(
         &self,
         py: Python<'_>,
         key: &str,
@@ -1485,51 +1669,6 @@ impl RedisRsDriver {
         count: i64,
         justid: bool,
     ) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_xautoclaim(
-            key,
-            group,
-            consumer,
-            min_idle_time,
-            start_id,
-            Some(count),
-            justid,
-        );
-        let r: redis::RedisResult<redis::Value> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        let (next_id, middle, deleted) = split_xautoclaim_reply(r.map_err(to_py_err)?);
-        if justid {
-            let ids = match middle {
-                redis::Value::Array(items) => {
-                    items.into_iter().filter_map(value_to_bytes).collect()
-                }
-                _ => Vec::new(),
-            };
-            RawResult::StreamAutoclaimJustIds((next_id, ids, deleted)).into_py(py)
-        } else {
-            let entries = flatten_xrange_reply(middle);
-            RawResult::StreamAutoclaim((next_id, entries, deleted)).into_py(py)
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (
-        key, group, consumer, *,
-        min_idle_time,
-        start_id = "0-0",
-        count = 100,
-        justid = false,
-    ))]
-    fn axautoclaim(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        group: &str,
-        consumer: &str,
-        min_idle_time: i64,
-        start_id: &str,
-        count: i64,
-        justid: bool,
-    ) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let group = group.to_string();
         let consumer = consumer.to_string();
@@ -1569,21 +1708,6 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (key, id, *, entries_added = None, max_deleted_entry_id = None))]
     fn xsetid(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        id: &str,
-        entries_added: Option<i64>,
-        max_deleted_entry_id: Option<String>,
-    ) -> PyResult<()> {
-        let cmd = cmd_xsetid(key, id, entries_added, max_deleted_entry_id.as_deref());
-        let r: redis::RedisResult<redis::Value> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        r.map(|_| ()).map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (key, id, *, entries_added = None, max_deleted_entry_id = None))]
-    fn axsetid(
         &self,
         py: Python<'_>,
         key: &str,

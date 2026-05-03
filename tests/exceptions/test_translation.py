@@ -58,10 +58,10 @@ def test_auth_failure_raises_authentication_error(valkey_url: str) -> None:
 
 
 def test_connect_to_dead_port_raises_connection_error() -> None:
-    from redis_rs_py._driver import RedisRsDriver
+    from redis_rs_py import Redis
 
     with pytest.raises(RedisConnectionError):
-        RedisRsDriver.connect_standard("redis://127.0.0.1:1/0")
+        Redis.from_url("redis://127.0.0.1:1/0")
 
 
 def test_short_timeout_raises_timeout_error(valkey_url: str) -> None:

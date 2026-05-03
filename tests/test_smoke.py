@@ -11,7 +11,7 @@ def test_package_exports_version() -> None:
 
 
 def test_package_exports_driver_class() -> None:
-    assert hasattr(redis_rs_py, "RedisRsDriver")
+    assert hasattr(redis_rs_py, "Redis")
 
 
 def test_package_exports_awaitable_class() -> None:

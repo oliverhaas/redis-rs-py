@@ -1,15 +1,19 @@
-// Admin / introspection commands for RedisRsDriver.
+// Admin / introspection commands.
 //
 // SCAN family + KEYS/RANDOMKEY + DBSIZE/FLUSHDB/FLUSHALL/SELECT +
 // INFO/CONFIG */CLIENT */OBJECT */MEMORY USAGE +
 // PING/ECHO/WAIT/WAITAOF/TIME/LASTSAVE/BGSAVE/BGREWRITEAOF/DEBUG SLEEP.
+//
+// Sync variants live in `#[pymethods] impl Redis`.
+// Async variants live in `#[pymethods] impl AsyncRedis` (a-prefix dropped).
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 
 use crate::async_bridge::RawResult;
-use crate::driver::RedisRsDriver;
 use crate::errors::{classify, to_py_err};
+use crate::facade::asyncio_mod::AsyncRedis;
+use crate::facade::sync::Redis;
 use crate::raw_result::IntoRawResult;
 use crate::{async_op, dispatch_cmd, sync_op};
 
@@ -386,7 +390,7 @@ fn validate_on_off_mode(mode: &str) -> PyResult<()> {
 }
 
 /// OBJECT HELP (and similar) can return either an Array of bulk-strings
-/// (RESP2 / older Valkey) or a SimpleString / VerbatimString (RESP3 Valkey ≥ 8).
+/// (RESP2 / older Valkey) or a SimpleString / VerbatimString (RESP3 Valkey >= 8).
 /// Normalise to a list of byte lines in all cases.
 fn parse_help_reply(v: redis::Value) -> Vec<Vec<u8>> {
     match v {
@@ -486,34 +490,37 @@ fn cmd_debug_sleep(seconds: f64) -> redis::Cmd {
 }
 
 /// Parse a TIME reply: Array(vec![BulkString("seconds"), BulkString("microseconds")]).
-fn parse_time_reply(value: redis::Value) -> Option<(String, String)> {
+/// Returns a pair of integers (seconds, microseconds).
+fn parse_time_reply(value: redis::Value) -> Option<(i64, i64)> {
     let parts = match value {
         redis::Value::Array(items) if items.len() == 2 => items,
         _ => return None,
     };
     let mut iter = parts.into_iter();
-    let secs = match iter.next()? {
-        redis::Value::BulkString(b) => String::from_utf8(b).ok()?,
-        redis::Value::SimpleString(s) => s,
+    let secs: i64 = match iter.next()? {
+        redis::Value::BulkString(b) => std::str::from_utf8(&b).ok()?.parse().ok()?,
+        redis::Value::SimpleString(s) => s.parse().ok()?,
+        redis::Value::Int(n) => n,
         _ => return None,
     };
-    let usecs = match iter.next()? {
-        redis::Value::BulkString(b) => String::from_utf8(b).ok()?,
-        redis::Value::SimpleString(s) => s,
+    let usecs: i64 = match iter.next()? {
+        redis::Value::BulkString(b) => std::str::from_utf8(&b).ok()?.parse().ok()?,
+        redis::Value::SimpleString(s) => s.parse().ok()?,
+        redis::Value::Int(n) => n,
         _ => return None,
     };
     Some((secs, usecs))
 }
 
 // =========================================================================
-// RedisRsDriver method impls
+// Sync impl (Redis)
 // =========================================================================
 
 #[pymethods]
-impl RedisRsDriver {
+impl Redis {
     // --- SCAN / KEYS / RANDOMKEY ---
 
-    #[pyo3(signature = (*, cursor=0, r#match=None, count=None, r#type=None))]
+    #[pyo3(signature = (cursor=0, *, r#match=None, count=None, r#type=None))]
     fn scan(
         &self,
         py: Python<'_>,
@@ -537,33 +544,6 @@ impl RedisRsDriver {
             .unbind())
     }
 
-    #[pyo3(signature = (*, cursor=0, r#match=None, count=None, r#type=None))]
-    fn ascan(
-        &self,
-        py: Python<'_>,
-        cursor: u64,
-        r#match: Option<String>,
-        count: Option<i64>,
-        r#type: Option<String>,
-    ) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_scan(cursor, r#match.as_deref(), count, r#type.as_deref());
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => {
-                    let (next_cursor, keys) = parse_scan_reply(v);
-                    RawResult::Value(redis::Value::Array(vec![
-                        redis::Value::Int(next_cursor as i64),
-                        redis::Value::Array(
-                            keys.into_iter().map(redis::Value::BulkString).collect(),
-                        ),
-                    ]))
-                }
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     fn keys(&self, py: Python<'_>, pattern: &str) -> PyResult<Py<PyAny>> {
         warn_keys_use(py)?;
         let cmd = cmd_keys(pattern);
@@ -572,29 +552,11 @@ impl RedisRsDriver {
         RawResult::BytesList(r.map_err(to_py_err)?).into_py(py)
     }
 
-    fn akeys(&self, py: Python<'_>, pattern: &str) -> PyResult<Py<PyAny>> {
-        let pattern = pattern.to_string();
-        warn_keys_use(py)?;
-        async_op!(self, py, conn, async {
-            let cmd = cmd_keys(&pattern);
-            let r: redis::RedisResult<Vec<Vec<u8>>> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
-    }
-
     fn randomkey(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let cmd = cmd_randomkey();
         let r: redis::RedisResult<Option<Vec<u8>>> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         RawResult::OptBytes(r.map_err(to_py_err)?).into_py(py)
-    }
-
-    fn arandomkey(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_randomkey();
-            let r: redis::RedisResult<Option<Vec<u8>>> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
     }
 
     // --- DBSIZE / FLUSHDB / FLUSHALL / SELECT ---
@@ -606,14 +568,6 @@ impl RedisRsDriver {
         r.map_err(to_py_err)
     }
 
-    fn adbsize(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_dbsize();
-            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
-    }
-
     #[pyo3(signature = (*, asynchronous=false))]
     fn flushdb(&self, py: Python<'_>, asynchronous: bool) -> PyResult<()> {
         let cmd = cmd_flushdb(asynchronous);
@@ -623,35 +577,11 @@ impl RedisRsDriver {
     }
 
     #[pyo3(signature = (*, asynchronous=false))]
-    fn aflushdb(&self, py: Python<'_>, asynchronous: bool) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_flushdb(asynchronous);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(_) => RawResult::Nil,
-                Err(e) => classify(e),
-            }
-        })
-    }
-
-    #[pyo3(signature = (*, asynchronous=false))]
     fn flushall(&self, py: Python<'_>, asynchronous: bool) -> PyResult<()> {
         let cmd = cmd_flushall(asynchronous);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         r.map(|_| ()).map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (*, asynchronous=false))]
-    fn aflushall(&self, py: Python<'_>, asynchronous: bool) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_flushall(asynchronous);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(_) => RawResult::Nil,
-                Err(e) => classify(e),
-            }
-        })
     }
 
     /// Per-Redis-instance database — set at connect time via the URL's
@@ -667,7 +597,7 @@ impl RedisRsDriver {
             Err(pyo3::exceptions::PyNotImplementedError::new_err(format!(
                 "SELECT to a different db is not supported under the multiplexed \
                  connection model (connected to db {connected}, requested {db_index}). \
-                 Construct a new RedisRsDriver with the desired db in the URL instead."
+                 Construct a new Redis with the desired db in the URL instead."
             )))
         }
     }
@@ -683,18 +613,6 @@ impl RedisRsDriver {
         Ok(PyBytes::new(py, &bytes).into_any().unbind())
     }
 
-    #[pyo3(signature = (*, section=None))]
-    fn ainfo(&self, py: Python<'_>, section: Option<String>) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_info(section.as_deref());
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => RawResult::OptBytes(Some(value_to_bytes(v))),
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     // --- CONFIG GET / SET / RESETSTAT / REWRITE ---
 
     fn config_get(&self, py: Python<'_>, parameter: &str) -> PyResult<Py<PyAny>> {
@@ -702,18 +620,6 @@ impl RedisRsDriver {
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         RawResult::BytesPairs(parse_config_get_reply(r.map_err(to_py_err)?)).into_py(py)
-    }
-
-    fn aconfig_get(&self, py: Python<'_>, parameter: &str) -> PyResult<Py<PyAny>> {
-        let parameter = parameter.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_config_get(&parameter);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => RawResult::BytesPairs(parse_config_get_reply(v)),
-                Err(e) => classify(e),
-            }
-        })
     }
 
     /// CONFIG SET — accepts either `(name, value)` positional args, or a
@@ -732,24 +638,6 @@ impl RedisRsDriver {
         r.map(|_| ()).map_err(to_py_err)
     }
 
-    #[pyo3(signature = (name_or_mapping, value=None))]
-    fn aconfig_set(
-        &self,
-        py: Python<'_>,
-        name_or_mapping: Bound<'_, PyAny>,
-        value: Option<String>,
-    ) -> PyResult<Py<PyAny>> {
-        let pairs = config_set_extract_pairs(&name_or_mapping, value)?;
-        async_op!(self, py, conn, async {
-            let cmd = cmd_config_set(&pairs);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(_) => RawResult::Nil,
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     fn config_resetstat(&self, py: Python<'_>) -> PyResult<()> {
         let cmd = cmd_config_resetstat();
         let r: redis::RedisResult<redis::Value> =
@@ -757,33 +645,11 @@ impl RedisRsDriver {
         r.map(|_| ()).map_err(to_py_err)
     }
 
-    fn aconfig_resetstat(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_config_resetstat();
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(_) => RawResult::Nil,
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     fn config_rewrite(&self, py: Python<'_>) -> PyResult<()> {
         let cmd = cmd_config_rewrite();
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         r.map(|_| ()).map_err(to_py_err)
-    }
-
-    fn aconfig_rewrite(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_config_rewrite();
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(_) => RawResult::Nil,
-                Err(e) => classify(e),
-            }
-        })
     }
 
     // --- CLIENT ID / GETNAME / SETNAME / INFO / LIST ---
@@ -795,27 +661,11 @@ impl RedisRsDriver {
         r.map_err(to_py_err)
     }
 
-    fn aclient_id(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_client_id();
-            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
-    }
-
     fn client_getname(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let cmd = cmd_client_getname();
         let r: redis::RedisResult<Option<Vec<u8>>> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         RawResult::OptBytes(r.map_err(to_py_err)?).into_py(py)
-    }
-
-    fn aclient_getname(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_client_getname();
-            let r: redis::RedisResult<Option<Vec<u8>>> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
-        })
     }
 
     fn client_setname(&self, py: Python<'_>, name: &str) -> PyResult<()> {
@@ -825,35 +675,12 @@ impl RedisRsDriver {
         r.map(|_| ()).map_err(to_py_err)
     }
 
-    fn aclient_setname(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
-        let name = name.to_string();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_client_setname(&name);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(_) => RawResult::Nil,
-                Err(e) => classify(e),
-            }
-        })
-    }
-
     fn client_info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let cmd = cmd_client_info();
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         let bytes = value_to_bytes(r.map_err(to_py_err)?);
         Ok(PyBytes::new(py, &bytes).into_any().unbind())
-    }
-
-    fn aclient_info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        async_op!(self, py, conn, async {
-            let cmd = cmd_client_info();
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => RawResult::OptBytes(Some(value_to_bytes(v))),
-                Err(e) => classify(e),
-            }
-        })
     }
 
     #[pyo3(signature = (*, client_type=None, client_id=None))]
@@ -870,24 +697,6 @@ impl RedisRsDriver {
         let text = value_to_bytes(r.map_err(to_py_err)?);
         let rows = parse_client_list_reply(&text);
         RawResult::BytesPairsList(rows).into_py(py)
-    }
-
-    #[pyo3(signature = (*, client_type=None, client_id=None))]
-    fn aclient_list(
-        &self,
-        py: Python<'_>,
-        client_type: Option<String>,
-        client_id: Option<Vec<i64>>,
-    ) -> PyResult<Py<PyAny>> {
-        let ids = client_id.unwrap_or_default();
-        async_op!(self, py, conn, async {
-            let cmd = cmd_client_list(client_type.as_deref(), &ids);
-            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
-            match r {
-                Ok(v) => RawResult::BytesPairsList(parse_client_list_reply(&value_to_bytes(v))),
-                Err(e) => classify(e),
-            }
-        })
     }
 
     // --- CLIENT KILL / PAUSE / UNPAUSE / NO-EVICT / NO-TOUCH ---
@@ -928,6 +737,404 @@ impl RedisRsDriver {
         r.map_err(to_py_err)
     }
 
+    #[pyo3(signature = (timeout_ms, *, all=true))]
+    fn client_pause(&self, py: Python<'_>, timeout_ms: i64, all: bool) -> PyResult<()> {
+        let cmd = cmd_client_pause(timeout_ms, all);
+        let r: redis::RedisResult<redis::Value> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        r.map(|_| ()).map_err(to_py_err)
+    }
+
+    fn client_unpause(&self, py: Python<'_>) -> PyResult<()> {
+        let cmd = cmd_client_unpause();
+        let r: redis::RedisResult<redis::Value> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        r.map(|_| ()).map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (*, mode))]
+    fn client_no_evict(&self, py: Python<'_>, mode: String) -> PyResult<()> {
+        validate_on_off_mode(&mode)?;
+        let cmd = cmd_client_no_evict(&mode.to_ascii_uppercase());
+        let r: redis::RedisResult<redis::Value> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        r.map(|_| ()).map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (*, mode))]
+    fn client_no_touch(&self, py: Python<'_>, mode: String) -> PyResult<()> {
+        validate_on_off_mode(&mode)?;
+        let cmd = cmd_client_no_touch(&mode.to_ascii_uppercase());
+        let r: redis::RedisResult<redis::Value> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        r.map(|_| ()).map_err(to_py_err)
+    }
+
+    // --- OBJECT ENCODING / IDLETIME / FREQ / REFCOUNT / HELP ---
+
+    fn object_encoding(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_object_subcmd("ENCODING", key);
+        let r: redis::RedisResult<Option<Vec<u8>>> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        RawResult::OptBytes(r.map_err(to_py_err)?).into_py(py)
+    }
+
+    fn object_idletime(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_object_subcmd("IDLETIME", key);
+        let r: redis::RedisResult<Option<i64>> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        RawResult::OptInt(r.map_err(to_py_err)?).into_py(py)
+    }
+
+    fn object_freq(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_object_subcmd("FREQ", key);
+        let r: redis::RedisResult<Option<i64>> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        RawResult::OptInt(r.map_err(to_py_err)?).into_py(py)
+    }
+
+    fn object_refcount(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_object_subcmd("REFCOUNT", key);
+        let r: redis::RedisResult<Option<i64>> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        RawResult::OptInt(r.map_err(to_py_err)?).into_py(py)
+    }
+
+    fn object_help(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_object_help();
+        let r: redis::RedisResult<redis::Value> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        RawResult::BytesList(parse_help_reply(r.map_err(to_py_err)?)).into_py(py)
+    }
+
+    // --- MEMORY USAGE ---
+
+    #[pyo3(signature = (key, *, samples=None))]
+    fn memory_usage(&self, py: Python<'_>, key: &str, samples: Option<i64>) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_memory_usage(key, samples);
+        let r: redis::RedisResult<Option<i64>> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        RawResult::OptInt(r.map_err(to_py_err)?).into_py(py)
+    }
+
+    // --- ECHO ---
+
+    #[pyo3(signature = (message))]
+    fn echo(&self, py: Python<'_>, message: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let bytes: Vec<u8> = if let Ok(s) = message.extract::<String>() {
+            s.into_bytes()
+        } else {
+            message.extract::<Vec<u8>>()?
+        };
+        let cmd = cmd_echo(&bytes);
+        let r: redis::RedisResult<Vec<u8>> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        Ok(PyBytes::new(py, &r.map_err(to_py_err)?).into_any().unbind())
+    }
+
+    // --- WAIT / WAITAOF ---
+
+    #[pyo3(signature = (*, numreplicas, timeout))]
+    fn wait(&self, py: Python<'_>, numreplicas: i64, timeout: i64) -> PyResult<i64> {
+        let cmd = cmd_wait(numreplicas, timeout);
+        let r: redis::RedisResult<i64> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        r.map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (*, numlocal, numreplicas, timeout))]
+    fn waitaof(
+        &self,
+        py: Python<'_>,
+        numlocal: i64,
+        numreplicas: i64,
+        timeout: i64,
+    ) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_waitaof(numlocal, numreplicas, timeout);
+        let r: redis::RedisResult<redis::Value> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        RawResult::Value(r.map_err(to_py_err)?).into_py(py)
+    }
+
+    // --- TIME ---
+
+    fn time(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_time();
+        let r: redis::RedisResult<redis::Value> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        match parse_time_reply(r.map_err(to_py_err)?) {
+            Some((secs, usecs)) => {
+                let a = secs.into_pyobject(py)?.into_any().unbind();
+                let b = usecs.into_pyobject(py)?.into_any().unbind();
+                Ok(PyTuple::new(py, [a, b])?.into_any().unbind())
+            }
+            None => Ok(py.None()),
+        }
+    }
+
+    // --- LASTSAVE / BGSAVE / BGREWRITEAOF ---
+
+    fn lastsave(&self, py: Python<'_>) -> PyResult<i64> {
+        let cmd = cmd_lastsave();
+        let r: redis::RedisResult<i64> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        r.map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (*, schedule=false))]
+    fn bgsave(&self, py: Python<'_>, schedule: bool) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_bgsave(schedule);
+        let r: redis::RedisResult<String> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        Ok(PyBytes::new(py, r.map_err(to_py_err)?.as_bytes())
+            .into_any()
+            .unbind())
+    }
+
+    fn bgrewriteaof(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let cmd = cmd_bgrewriteaof();
+        let r: redis::RedisResult<String> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        Ok(PyBytes::new(py, r.map_err(to_py_err)?.as_bytes())
+            .into_any()
+            .unbind())
+    }
+
+    // --- DEBUG SLEEP (test-only) ---
+
+    /// Test-only — DO NOT call this from production code. Blocks the
+    /// server (and our connection) for `seconds`. Used in blocking-cmd
+    /// tests to simulate a slow-server scenario.
+    fn debug_sleep(&self, py: Python<'_>, seconds: f64) -> PyResult<()> {
+        let cmd = cmd_debug_sleep(seconds);
+        let r: redis::RedisResult<redis::Value> =
+            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+        r.map(|_| ()).map_err(to_py_err)
+    }
+
+    // --- _blocking_initialised (test helper) ---
+
+    /// Returns whether the blocking connection has been initialised.
+    fn _blocking_initialised(&self) -> bool {
+        self.connection.blocking_initialised()
+    }
+}
+
+// =========================================================================
+// Async impl (AsyncRedis)
+// =========================================================================
+
+#[pymethods]
+impl AsyncRedis {
+    // --- SCAN / KEYS / RANDOMKEY ---
+
+    #[pyo3(signature = (cursor=0, *, r#match=None, count=None, r#type=None))]
+    fn scan(
+        &self,
+        py: Python<'_>,
+        cursor: u64,
+        r#match: Option<String>,
+        count: Option<i64>,
+        r#type: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_scan(cursor, r#match.as_deref(), count, r#type.as_deref());
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => {
+                    let (next_cursor, keys) = parse_scan_reply(v);
+                    RawResult::Value(redis::Value::Array(vec![
+                        redis::Value::Int(next_cursor as i64),
+                        redis::Value::Array(
+                            keys.into_iter().map(redis::Value::BulkString).collect(),
+                        ),
+                    ]))
+                }
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    fn keys(&self, py: Python<'_>, pattern: &str) -> PyResult<Py<PyAny>> {
+        let pattern = pattern.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_keys(&pattern);
+            let r: redis::RedisResult<Vec<Vec<u8>>> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    fn randomkey(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_randomkey();
+            let r: redis::RedisResult<Option<Vec<u8>>> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    // --- DBSIZE / FLUSHDB / FLUSHALL ---
+
+    fn dbsize(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_dbsize();
+            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (*, asynchronous=false))]
+    fn flushdb(&self, py: Python<'_>, asynchronous: bool) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_flushdb(asynchronous);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(_) => RawResult::Nil,
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    #[pyo3(signature = (*, asynchronous=false))]
+    fn flushall(&self, py: Python<'_>, asynchronous: bool) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_flushall(asynchronous);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(_) => RawResult::Nil,
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // --- INFO ---
+
+    #[pyo3(signature = (*, section=None))]
+    fn info(&self, py: Python<'_>, section: Option<String>) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_info(section.as_deref());
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => RawResult::OptBytes(Some(value_to_bytes(v))),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // --- CONFIG GET / SET / RESETSTAT / REWRITE ---
+
+    fn config_get(&self, py: Python<'_>, parameter: &str) -> PyResult<Py<PyAny>> {
+        let parameter = parameter.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_config_get(&parameter);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => RawResult::BytesPairs(parse_config_get_reply(v)),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    #[pyo3(signature = (name_or_mapping, value=None))]
+    fn config_set(
+        &self,
+        py: Python<'_>,
+        name_or_mapping: Bound<'_, PyAny>,
+        value: Option<String>,
+    ) -> PyResult<Py<PyAny>> {
+        let pairs = config_set_extract_pairs(&name_or_mapping, value)?;
+        async_op!(self, py, conn, async {
+            let cmd = cmd_config_set(&pairs);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(_) => RawResult::Nil,
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    fn config_resetstat(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_config_resetstat();
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(_) => RawResult::Nil,
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    fn config_rewrite(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_config_rewrite();
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(_) => RawResult::Nil,
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // --- CLIENT ID / GETNAME / SETNAME / INFO / LIST ---
+
+    fn client_id(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_client_id();
+            let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    fn client_getname(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_client_getname();
+            let r: redis::RedisResult<Option<Vec<u8>>> = dispatch_cmd!(&mut *conn, cmd);
+            r.into_raw_result()
+        })
+    }
+
+    fn client_setname(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        let name = name.to_string();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_client_setname(&name);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(_) => RawResult::Nil,
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    fn client_info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            let cmd = cmd_client_info();
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => RawResult::OptBytes(Some(value_to_bytes(v))),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    #[pyo3(signature = (*, client_type=None, client_id=None))]
+    fn client_list(
+        &self,
+        py: Python<'_>,
+        client_type: Option<String>,
+        client_id: Option<Vec<i64>>,
+    ) -> PyResult<Py<PyAny>> {
+        let ids = client_id.unwrap_or_default();
+        async_op!(self, py, conn, async {
+            let cmd = cmd_client_list(client_type.as_deref(), &ids);
+            let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(v) => RawResult::BytesPairsList(parse_client_list_reply(&value_to_bytes(v))),
+                Err(e) => classify(e),
+            }
+        })
+    }
+
+    // --- CLIENT KILL / PAUSE / UNPAUSE / NO-EVICT / NO-TOUCH ---
+
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (
         *,
@@ -939,7 +1146,7 @@ impl RedisRsDriver {
         skipme=None,
         maxage=None,
     ))]
-    fn aclient_kill(
+    fn client_kill(
         &self,
         py: Python<'_>,
         addr: Option<String>,
@@ -966,15 +1173,7 @@ impl RedisRsDriver {
     }
 
     #[pyo3(signature = (timeout_ms, *, all=true))]
-    fn client_pause(&self, py: Python<'_>, timeout_ms: i64, all: bool) -> PyResult<()> {
-        let cmd = cmd_client_pause(timeout_ms, all);
-        let r: redis::RedisResult<redis::Value> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        r.map(|_| ()).map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (timeout_ms, *, all=true))]
-    fn aclient_pause(&self, py: Python<'_>, timeout_ms: i64, all: bool) -> PyResult<Py<PyAny>> {
+    fn client_pause(&self, py: Python<'_>, timeout_ms: i64, all: bool) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             let cmd = cmd_client_pause(timeout_ms, all);
             let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
@@ -985,14 +1184,7 @@ impl RedisRsDriver {
         })
     }
 
-    fn client_unpause(&self, py: Python<'_>) -> PyResult<()> {
-        let cmd = cmd_client_unpause();
-        let r: redis::RedisResult<redis::Value> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        r.map(|_| ()).map_err(to_py_err)
-    }
-
-    fn aclient_unpause(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn client_unpause(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             let cmd = cmd_client_unpause();
             let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
@@ -1004,16 +1196,7 @@ impl RedisRsDriver {
     }
 
     #[pyo3(signature = (*, mode))]
-    fn client_no_evict(&self, py: Python<'_>, mode: String) -> PyResult<()> {
-        validate_on_off_mode(&mode)?;
-        let cmd = cmd_client_no_evict(&mode.to_ascii_uppercase());
-        let r: redis::RedisResult<redis::Value> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        r.map(|_| ()).map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (*, mode))]
-    fn aclient_no_evict(&self, py: Python<'_>, mode: String) -> PyResult<Py<PyAny>> {
+    fn client_no_evict(&self, py: Python<'_>, mode: String) -> PyResult<Py<PyAny>> {
         validate_on_off_mode(&mode)?;
         async_op!(self, py, conn, async {
             let cmd = cmd_client_no_evict(&mode.to_ascii_uppercase());
@@ -1026,16 +1209,7 @@ impl RedisRsDriver {
     }
 
     #[pyo3(signature = (*, mode))]
-    fn client_no_touch(&self, py: Python<'_>, mode: String) -> PyResult<()> {
-        validate_on_off_mode(&mode)?;
-        let cmd = cmd_client_no_touch(&mode.to_ascii_uppercase());
-        let r: redis::RedisResult<redis::Value> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        r.map(|_| ()).map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (*, mode))]
-    fn aclient_no_touch(&self, py: Python<'_>, mode: String) -> PyResult<Py<PyAny>> {
+    fn client_no_touch(&self, py: Python<'_>, mode: String) -> PyResult<Py<PyAny>> {
         validate_on_off_mode(&mode)?;
         async_op!(self, py, conn, async {
             let cmd = cmd_client_no_touch(&mode.to_ascii_uppercase());
@@ -1050,13 +1224,6 @@ impl RedisRsDriver {
     // --- OBJECT ENCODING / IDLETIME / FREQ / REFCOUNT / HELP ---
 
     fn object_encoding(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_object_subcmd("ENCODING", key);
-        let r: redis::RedisResult<Option<Vec<u8>>> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::OptBytes(r.map_err(to_py_err)?).into_py(py)
-    }
-
-    fn aobject_encoding(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let cmd = cmd_object_subcmd("ENCODING", &key);
@@ -1066,13 +1233,6 @@ impl RedisRsDriver {
     }
 
     fn object_idletime(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_object_subcmd("IDLETIME", key);
-        let r: redis::RedisResult<Option<i64>> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::OptInt(r.map_err(to_py_err)?).into_py(py)
-    }
-
-    fn aobject_idletime(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let cmd = cmd_object_subcmd("IDLETIME", &key);
@@ -1082,13 +1242,6 @@ impl RedisRsDriver {
     }
 
     fn object_freq(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_object_subcmd("FREQ", key);
-        let r: redis::RedisResult<Option<i64>> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::OptInt(r.map_err(to_py_err)?).into_py(py)
-    }
-
-    fn aobject_freq(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let cmd = cmd_object_subcmd("FREQ", &key);
@@ -1098,13 +1251,6 @@ impl RedisRsDriver {
     }
 
     fn object_refcount(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_object_subcmd("REFCOUNT", key);
-        let r: redis::RedisResult<Option<i64>> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::OptInt(r.map_err(to_py_err)?).into_py(py)
-    }
-
-    fn aobject_refcount(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let cmd = cmd_object_subcmd("REFCOUNT", &key);
@@ -1114,13 +1260,6 @@ impl RedisRsDriver {
     }
 
     fn object_help(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_object_help();
-        let r: redis::RedisResult<redis::Value> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::BytesList(parse_help_reply(r.map_err(to_py_err)?)).into_py(py)
-    }
-
-    fn aobject_help(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             let cmd = cmd_object_help();
             let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
@@ -1135,19 +1274,6 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (key, *, samples=None))]
     fn memory_usage(&self, py: Python<'_>, key: &str, samples: Option<i64>) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_memory_usage(key, samples);
-        let r: redis::RedisResult<Option<i64>> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::OptInt(r.map_err(to_py_err)?).into_py(py)
-    }
-
-    #[pyo3(signature = (key, *, samples=None))]
-    fn amemory_usage(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        samples: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let cmd = cmd_memory_usage(&key, samples);
@@ -1165,19 +1291,6 @@ impl RedisRsDriver {
         } else {
             message.extract::<Vec<u8>>()?
         };
-        let cmd = cmd_echo(&bytes);
-        let r: redis::RedisResult<Vec<u8>> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        Ok(PyBytes::new(py, &r.map_err(to_py_err)?).into_any().unbind())
-    }
-
-    #[pyo3(signature = (message))]
-    fn aecho(&self, py: Python<'_>, message: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let bytes: Vec<u8> = if let Ok(s) = message.extract::<String>() {
-            s.into_bytes()
-        } else {
-            message.extract::<Vec<u8>>()?
-        };
         async_op!(self, py, conn, async {
             let cmd = cmd_echo(&bytes);
             let r: redis::RedisResult<Vec<u8>> = dispatch_cmd!(&mut *conn, cmd);
@@ -1188,16 +1301,7 @@ impl RedisRsDriver {
     // --- WAIT / WAITAOF ---
 
     #[pyo3(signature = (*, numreplicas, timeout))]
-    fn wait(&self, py: Python<'_>, numreplicas: i64, timeout: i64) -> PyResult<i64> {
-        let cmd = cmd_wait(numreplicas, timeout);
-        let r: redis::RedisResult<i64> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        r.map_err(to_py_err)
-    }
-
-    /// Async name `await_` to avoid keyword collision with Python's `await`.
-    #[pyo3(name = "await_", signature = (*, numreplicas, timeout))]
-    fn r_await(&self, py: Python<'_>, numreplicas: i64, timeout: i64) -> PyResult<Py<PyAny>> {
+    fn wait(&self, py: Python<'_>, numreplicas: i64, timeout: i64) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             let cmd = cmd_wait(numreplicas, timeout);
             let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
@@ -1205,22 +1309,15 @@ impl RedisRsDriver {
         })
     }
 
-    #[pyo3(signature = (*, numlocal, numreplicas, timeout))]
-    fn waitaof(
-        &self,
-        py: Python<'_>,
-        numlocal: i64,
-        numreplicas: i64,
-        timeout: i64,
-    ) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_waitaof(numlocal, numreplicas, timeout);
-        let r: redis::RedisResult<redis::Value> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::Value(r.map_err(to_py_err)?).into_py(py)
+    /// Alias for `wait` — `await` is a Python keyword so redis-py uses
+    /// `await_` as the method name. We support both for compatibility.
+    #[pyo3(name = "await_", signature = (*, numreplicas, timeout))]
+    fn wait_alias(&self, py: Python<'_>, numreplicas: i64, timeout: i64) -> PyResult<Py<PyAny>> {
+        self.wait(py, numreplicas, timeout)
     }
 
     #[pyo3(signature = (*, numlocal, numreplicas, timeout))]
-    fn awaitaof(
+    fn waitaof(
         &self,
         py: Python<'_>,
         numlocal: i64,
@@ -1237,18 +1334,11 @@ impl RedisRsDriver {
     // --- TIME ---
 
     fn time(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_time();
-        let r: redis::RedisResult<redis::Value> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::OptStrPair(parse_time_reply(r.map_err(to_py_err)?)).into_py(py)
-    }
-
-    fn atime(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             let cmd = cmd_time();
             let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);
             match r {
-                Ok(v) => RawResult::OptStrPair(parse_time_reply(v)),
+                Ok(v) => RawResult::IntPair(parse_time_reply(v)),
                 Err(e) => classify(e),
             }
         })
@@ -1256,14 +1346,7 @@ impl RedisRsDriver {
 
     // --- LASTSAVE / BGSAVE / BGREWRITEAOF ---
 
-    fn lastsave(&self, py: Python<'_>) -> PyResult<i64> {
-        let cmd = cmd_lastsave();
-        let r: redis::RedisResult<i64> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        r.map_err(to_py_err)
-    }
-
-    fn alastsave(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn lastsave(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             let cmd = cmd_lastsave();
             let r: redis::RedisResult<i64> = dispatch_cmd!(&mut *conn, cmd);
@@ -1273,49 +1356,30 @@ impl RedisRsDriver {
 
     #[pyo3(signature = (*, schedule=false))]
     fn bgsave(&self, py: Python<'_>, schedule: bool) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_bgsave(schedule);
-        let r: redis::RedisResult<Vec<u8>> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        Ok(PyBytes::new(py, &r.map_err(to_py_err)?).into_any().unbind())
-    }
-
-    #[pyo3(signature = (*, schedule=false))]
-    fn abgsave(&self, py: Python<'_>, schedule: bool) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             let cmd = cmd_bgsave(schedule);
-            let r: redis::RedisResult<Vec<u8>> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
+            let r: redis::RedisResult<String> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(_) => RawResult::Nil,
+                Err(e) => crate::errors::classify(e),
+            }
         })
     }
 
     fn bgrewriteaof(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let cmd = cmd_bgrewriteaof();
-        let r: redis::RedisResult<Vec<u8>> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        Ok(PyBytes::new(py, &r.map_err(to_py_err)?).into_any().unbind())
-    }
-
-    fn abgrewriteaof(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             let cmd = cmd_bgrewriteaof();
-            let r: redis::RedisResult<Vec<u8>> = dispatch_cmd!(&mut *conn, cmd);
-            r.into_raw_result()
+            let r: redis::RedisResult<String> = dispatch_cmd!(&mut *conn, cmd);
+            match r {
+                Ok(_) => RawResult::Nil,
+                Err(e) => crate::errors::classify(e),
+            }
         })
     }
 
     // --- DEBUG SLEEP (test-only) ---
 
-    /// Test-only — DO NOT call this from production code. Blocks the
-    /// server (and our connection) for `seconds`. Used in blocking-cmd
-    /// tests to simulate a slow-server scenario.
-    fn debug_sleep(&self, py: Python<'_>, seconds: f64) -> PyResult<()> {
-        let cmd = cmd_debug_sleep(seconds);
-        let r: redis::RedisResult<redis::Value> =
-            sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        r.map(|_| ()).map_err(to_py_err)
-    }
-
-    fn adebug_sleep(&self, py: Python<'_>, seconds: f64) -> PyResult<Py<PyAny>> {
+    fn debug_sleep(&self, py: Python<'_>, seconds: f64) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             let cmd = cmd_debug_sleep(seconds);
             let r: redis::RedisResult<redis::Value> = dispatch_cmd!(&mut *conn, cmd);

@@ -1,21 +1,14 @@
-// Hash commands on RedisRsDriver.
-//
-// Every method exists as a sync + async pair:
-//   * `<cmd>(...)` — sync; releases the GIL via py.detach.
-//   * `a<cmd>(...)` — async; returns a RedisRsAwaitable.
-//
-// The hash-field TTL family (HEXPIRE / HPEXPIRE / ...) requires Redis/Valkey
-// >= 7.4. The tests gate these via a version probe; the Rust code sends the
-// raw commands unconditionally and surfaces any WRONGTYPE / unknown-command
-// errors through the standard exception classifier.
+// Hash commands — impl Redis (sync) + impl AsyncRedis (async).
 
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyList, PyTuple};
 
 use crate::async_bridge::RawResult;
-use crate::driver::{RedisRsDriver, py_bool, py_bytes_list, py_bytes_pairs, py_int, py_opt_bytes};
 use crate::errors::to_py_err;
 use crate::exceptions::{DataError, ExceptionClass};
+use crate::facade::asyncio_mod::AsyncRedis;
+use crate::facade::sync::Redis;
+use crate::helpers::{py_bool, py_bytes_list, py_bytes_pairs, py_int, py_opt_bytes};
 use crate::raw_result::IntoRawResult;
 use crate::{async_op, sync_op};
 
@@ -23,8 +16,6 @@ use crate::{async_op, sync_op};
 // Module-private helpers
 // =========================================================================
 
-/// Flatten redis-py-style positional pairs + `mapping` kwarg into a
-/// `Vec<(String, Vec<u8>)>` for HSET / HMSET.
 fn collect_field_value_pairs(
     items: &Bound<'_, PyTuple>,
     mapping: Option<&Bound<'_, PyDict>>,
@@ -109,7 +100,6 @@ fn validate_ttl_modifiers(
     })
 }
 
-/// Convert a Vec<i64> TTL reply into a Python list[int].
 fn int_list_to_py(py: Python<'_>, items: Vec<i64>) -> PyResult<Py<PyAny>> {
     let py_items: Vec<Py<PyAny>> = items
         .into_iter()
@@ -186,10 +176,8 @@ pub(crate) fn render_hrandfield(
     withvalues: bool,
 ) -> PyResult<Py<PyAny>> {
     match (count, value) {
-        // No count → single bytes or None.
         (None, redis::Value::Nil) => Ok(py.None()),
         (None, redis::Value::BulkString(b)) => Ok(PyBytes::new(py, &b).into_any().unbind()),
-        // count without WITHVALUES → flat list[bytes].
         (Some(_), redis::Value::Array(items)) if !withvalues => {
             let py_items: Vec<Py<PyAny>> = items
                 .into_iter()
@@ -203,12 +191,8 @@ pub(crate) fn render_hrandfield(
                 .collect();
             Ok(PyList::new(py, py_items)?.into_any().unbind())
         }
-        // count + WITHVALUES → list[tuple[bytes, bytes]].
-        // RESP2 returns a flat array [field, value, field, value, ...];
-        // RESP3 returns an array of two-element arrays. Handle both.
         (Some(_), redis::Value::Array(items)) if withvalues => {
             let mut pairs: Vec<Py<PyAny>> = Vec::new();
-            // Detect shape from first item.
             let nested = items
                 .first()
                 .map(|first| matches!(first, redis::Value::Array(_)))
@@ -253,30 +237,16 @@ pub(crate) fn render_hrandfield(
 }
 
 // =========================================================================
-// #[pymethods] impl block
+// Sync — redis_rs_py.Redis
 // =========================================================================
 
 #[pymethods]
-impl RedisRsDriver {
-    // =====================================================================
-    // (a) HGET / HSET / HSETNX
-    // =====================================================================
-
+impl Redis {
     #[pyo3(signature = (key, field))]
     fn hget(&self, py: Python<'_>, key: &str, field: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Option<Vec<u8>>> =
             sync_op!(py, self, conn, async { conn.hget(key, field).await });
         Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
-    }
-
-    #[pyo3(signature = (key, field))]
-    fn ahget(&self, py: Python<'_>, key: &str, field: &str) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let field = field.to_string();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<Option<Vec<u8>>> = conn.hget(&key, &field).await;
-            r.into_raw_result()
-        })
     }
 
     #[pyo3(signature = (key, *items, mapping=None))]
@@ -294,22 +264,6 @@ impl RedisRsDriver {
         py_int(py, r.map_err(to_py_err)?)
     }
 
-    #[pyo3(signature = (key, *items, mapping=None))]
-    fn ahset(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        items: &Bound<'_, PyTuple>,
-        mapping: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Py<PyAny>> {
-        let pairs = collect_field_value_pairs(items, mapping)?;
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<i64> = conn.hset_multiple(&key, &pairs).await;
-            r.into_raw_result()
-        })
-    }
-
     #[pyo3(signature = (key, field, value))]
     fn hsetnx(&self, py: Python<'_>, key: &str, field: &str, value: &[u8]) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<bool> = sync_op!(py, self, conn, async {
@@ -318,21 +272,6 @@ impl RedisRsDriver {
         py_bool(py, r.map_err(to_py_err)?)
     }
 
-    #[pyo3(signature = (key, field, value))]
-    fn ahsetnx(&self, py: Python<'_>, key: &str, field: &str, value: &[u8]) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let field = field.to_string();
-        let value = value.to_vec();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<bool> = conn.hset_nx(&key, &field, &value).await;
-            r.into_raw_result()
-        })
-    }
-
-    // =====================================================================
-    // (b) HGETALL / HMGET / HMSET
-    // =====================================================================
-
     #[pyo3(signature = (key))]
     fn hgetall(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Vec<(Vec<u8>, Vec<u8>)>> =
@@ -340,22 +279,33 @@ impl RedisRsDriver {
         py_bytes_pairs(py, r.map_err(to_py_err)?)
     }
 
-    #[pyo3(signature = (key))]
-    fn ahgetall(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<Vec<(Vec<u8>, Vec<u8>)>> = conn.hgetall(&key).await;
-            r.into_raw_result()
-        })
-    }
-
     #[pyo3(signature = (key, *fields))]
-    fn hmget(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
-        if fields.is_empty() {
+    fn hmget(&self, py: Python<'_>, key: &str, fields: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        // Support both hmget("h", "a", "b") and hmget("h", ["a", "b"])
+        let field_strs: Vec<String> = if fields.len() == 1 {
+            let first = fields.get_item(0)?;
+            if first.is_instance_of::<PyList>() || first.is_instance_of::<PyTuple>() {
+                first
+                    .try_iter()?
+                    .map(|item| item?.extract::<String>())
+                    .collect::<PyResult<_>>()?
+            } else {
+                fields
+                    .iter()
+                    .map(|k| k.extract::<String>())
+                    .collect::<PyResult<_>>()?
+            }
+        } else {
+            fields
+                .iter()
+                .map(|k| k.extract::<String>())
+                .collect::<PyResult<_>>()?
+        };
+        if field_strs.is_empty() {
             return Ok(PyList::empty(py).into_any().unbind());
         }
         let r: redis::RedisResult<Vec<Option<Vec<u8>>>> = sync_op!(py, self, conn, async {
-            conn.hget_multiple(key, &fields).await
+            conn.hget_multiple(key, &field_strs).await
         });
         let raw = r.map_err(to_py_err)?;
         let py_items: Vec<Py<PyAny>> = raw
@@ -368,19 +318,6 @@ impl RedisRsDriver {
         Ok(PyList::new(py, py_items)?.into_any().unbind())
     }
 
-    #[pyo3(signature = (key, *fields))]
-    fn ahmget(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            if fields.is_empty() {
-                return RawResult::OptBytesList(Vec::new());
-            }
-            let r: redis::RedisResult<Vec<Option<Vec<u8>>>> =
-                conn.hget_multiple(&key, &fields).await;
-            r.into_raw_result()
-        })
-    }
-
     #[pyo3(signature = (key, mapping))]
     fn hmset(&self, py: Python<'_>, key: &str, mapping: &Bound<'_, PyDict>) -> PyResult<()> {
         warn_hmset_deprecated(py)?;
@@ -390,26 +327,6 @@ impl RedisRsDriver {
         });
         r.map_err(to_py_err)
     }
-
-    #[pyo3(signature = (key, mapping))]
-    fn ahmset(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        mapping: &Bound<'_, PyDict>,
-    ) -> PyResult<Py<PyAny>> {
-        warn_hmset_deprecated(py)?;
-        let pairs = mapping_to_pairs(mapping)?;
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<()> = conn.hset_multiple_void(&key, &pairs).await;
-            r.into_raw_result()
-        })
-    }
-
-    // =====================================================================
-    // (c) HDEL / HEXISTS / HLEN
-    // =====================================================================
 
     #[pyo3(signature = (key, *fields))]
     fn hdel(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
@@ -421,33 +338,11 @@ impl RedisRsDriver {
         py_int(py, r.map_err(to_py_err)?)
     }
 
-    #[pyo3(signature = (key, *fields))]
-    fn ahdel(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            if fields.is_empty() {
-                return RawResult::Int(0);
-            }
-            let r: redis::RedisResult<i64> = conn.hdel(&key, &fields).await;
-            r.into_raw_result()
-        })
-    }
-
     #[pyo3(signature = (key, field))]
     fn hexists(&self, py: Python<'_>, key: &str, field: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<bool> =
             sync_op!(py, self, conn, async { conn.hexists(key, field).await });
         py_bool(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, field))]
-    fn ahexists(&self, py: Python<'_>, key: &str, field: &str) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let field = field.to_string();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<bool> = conn.hexists(&key, &field).await;
-            r.into_raw_result()
-        })
     }
 
     #[pyo3(signature = (key))]
@@ -457,19 +352,6 @@ impl RedisRsDriver {
     }
 
     #[pyo3(signature = (key))]
-    fn ahlen(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<i64> = conn.hlen(&key).await;
-            r.into_raw_result()
-        })
-    }
-
-    // =====================================================================
-    // (d) HKEYS / HVALS / HRANDFIELD
-    // =====================================================================
-
-    #[pyo3(signature = (key))]
     fn hkeys(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             sync_op!(py, self, conn, async { conn.hkeys(key).await });
@@ -477,28 +359,10 @@ impl RedisRsDriver {
     }
 
     #[pyo3(signature = (key))]
-    fn ahkeys(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<Vec<Vec<u8>>> = conn.hkeys(&key).await;
-            r.into_raw_result()
-        })
-    }
-
-    #[pyo3(signature = (key))]
     fn hvals(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             sync_op!(py, self, conn, async { conn.hvals(key).await });
         py_bytes_list(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key))]
-    fn ahvals(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<Vec<Vec<u8>>> = conn.hvals(&key).await;
-            r.into_raw_result()
-        })
     }
 
     #[pyo3(signature = (key, count=None, withvalues=false))]
@@ -516,8 +380,313 @@ impl RedisRsDriver {
         render_hrandfield(py, value, count, withvalues)
     }
 
+    #[pyo3(signature = (key, field, amount))]
+    fn hincrby(&self, py: Python<'_>, key: &str, field: &str, amount: i64) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
+            conn.hincrby(key, field, amount).await
+        });
+        py_int(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, field, amount))]
+    fn hincrbyfloat(&self, py: Python<'_>, key: &str, field: &str, amount: f64) -> PyResult<f64> {
+        sync_op!(py, self, conn, async {
+            conn.hincrbyfloat(key, field, amount).await
+        })
+        .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (key, *, cursor=0, r#match=None, count=None, novalues=false))]
+    fn hscan(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        cursor: u64,
+        r#match: Option<String>,
+        count: Option<i64>,
+        novalues: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<redis::Value> = sync_op!(py, self, conn, async {
+            conn.hscan_raw(key, cursor, r#match.as_deref(), count, novalues)
+                .await
+        });
+        let value = r.map_err(to_py_err)?;
+        let (cur, payload) = split_scan_reply(value)?;
+        render_hscan(py, cur, payload, novalues)
+    }
+
+    #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn hexpire(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        fields: Vec<String>,
+        time: i64,
+        nx: bool,
+        xx: bool,
+        gt: bool,
+        lt: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let modifier = validate_ttl_modifiers(nx, xx, gt, lt)?;
+        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
+            conn.hexpire_family("HEXPIRE", key, &fields, time, modifier)
+                .await
+        });
+        int_list_to_py(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn hpexpire(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        fields: Vec<String>,
+        time: i64,
+        nx: bool,
+        xx: bool,
+        gt: bool,
+        lt: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let modifier = validate_ttl_modifiers(nx, xx, gt, lt)?;
+        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
+            conn.hexpire_family("HPEXPIRE", key, &fields, time, modifier)
+                .await
+        });
+        int_list_to_py(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn hexpireat(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        fields: Vec<String>,
+        time: i64,
+        nx: bool,
+        xx: bool,
+        gt: bool,
+        lt: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let modifier = validate_ttl_modifiers(nx, xx, gt, lt)?;
+        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
+            conn.hexpire_family("HEXPIREAT", key, &fields, time, modifier)
+                .await
+        });
+        int_list_to_py(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn hpexpireat(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        fields: Vec<String>,
+        time: i64,
+        nx: bool,
+        xx: bool,
+        gt: bool,
+        lt: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let modifier = validate_ttl_modifiers(nx, xx, gt, lt)?;
+        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
+            conn.hexpire_family("HPEXPIREAT", key, &fields, time, modifier)
+                .await
+        });
+        int_list_to_py(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, fields))]
+    fn hexpiretime(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
+            conn.httl_family("HEXPIRETIME", key, &fields).await
+        });
+        int_list_to_py(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, fields))]
+    fn hpexpiretime(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
+            conn.httl_family("HPEXPIRETIME", key, &fields).await
+        });
+        int_list_to_py(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, fields))]
+    fn httl(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
+            conn.httl_family("HTTL", key, &fields).await
+        });
+        int_list_to_py(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, fields))]
+    fn hpttl(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
+            conn.httl_family("HPTTL", key, &fields).await
+        });
+        int_list_to_py(py, r.map_err(to_py_err)?)
+    }
+
+    #[pyo3(signature = (key, fields))]
+    fn hpersist(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
+            conn.httl_family("HPERSIST", key, &fields).await
+        });
+        int_list_to_py(py, r.map_err(to_py_err)?)
+    }
+}
+
+// =========================================================================
+// Async — redis_rs_py.asyncio.Redis
+// =========================================================================
+
+#[pymethods]
+impl AsyncRedis {
+    #[pyo3(signature = (key, field))]
+    fn hget(&self, py: Python<'_>, key: &str, field: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let field = field.to_string();
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<Option<Vec<u8>>> = conn.hget(&key, &field).await;
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (key, *items, mapping=None))]
+    fn hset(
+        &self,
+        py: Python<'_>,
+        key: &str,
+        items: &Bound<'_, PyTuple>,
+        mapping: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let pairs = collect_field_value_pairs(items, mapping)?;
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<i64> = conn.hset_multiple(&key, &pairs).await;
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (key, field, value))]
+    fn hsetnx(&self, py: Python<'_>, key: &str, field: &str, value: &[u8]) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let field = field.to_string();
+        let value = value.to_vec();
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<bool> = conn.hset_nx(&key, &field, &value).await;
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (key))]
+    fn hgetall(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<Vec<(Vec<u8>, Vec<u8>)>> = conn.hgetall(&key).await;
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (key, *fields))]
+    fn hmget(&self, py: Python<'_>, key: &str, fields: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
+        // Support both hmget("h", "a", "b") and hmget("h", ["a", "b"])
+        let field_strs: Vec<String> = if fields.len() == 1 {
+            let first = fields.get_item(0)?;
+            if first.is_instance_of::<PyList>() || first.is_instance_of::<PyTuple>() {
+                first
+                    .try_iter()?
+                    .map(|item| item?.extract::<String>())
+                    .collect::<PyResult<_>>()?
+            } else {
+                fields
+                    .iter()
+                    .map(|k| k.extract::<String>())
+                    .collect::<PyResult<_>>()?
+            }
+        } else {
+            fields
+                .iter()
+                .map(|k| k.extract::<String>())
+                .collect::<PyResult<_>>()?
+        };
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            if field_strs.is_empty() {
+                return RawResult::OptBytesList(Vec::new());
+            }
+            let r: redis::RedisResult<Vec<Option<Vec<u8>>>> =
+                conn.hget_multiple(&key, &field_strs).await;
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (key, mapping))]
+    fn hmset(&self, py: Python<'_>, key: &str, mapping: &Bound<'_, PyDict>) -> PyResult<Py<PyAny>> {
+        warn_hmset_deprecated(py)?;
+        let pairs = mapping_to_pairs(mapping)?;
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<()> = conn.hset_multiple_void(&key, &pairs).await;
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (key, *fields))]
+    fn hdel(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            if fields.is_empty() {
+                return RawResult::Int(0);
+            }
+            let r: redis::RedisResult<i64> = conn.hdel(&key, &fields).await;
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (key, field))]
+    fn hexists(&self, py: Python<'_>, key: &str, field: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        let field = field.to_string();
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<bool> = conn.hexists(&key, &field).await;
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (key))]
+    fn hlen(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<i64> = conn.hlen(&key).await;
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (key))]
+    fn hkeys(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<Vec<Vec<u8>>> = conn.hkeys(&key).await;
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (key))]
+    fn hvals(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<Vec<Vec<u8>>> = conn.hvals(&key).await;
+            r.into_raw_result()
+        })
+    }
+
     #[pyo3(signature = (key, count=None, withvalues=false))]
-    fn ahrandfield(
+    fn hrandfield(
         &self,
         py: Python<'_>,
         key: &str,
@@ -540,20 +709,8 @@ impl RedisRsDriver {
         Ok(awaitable.into_pyobject(py)?.into_any().unbind())
     }
 
-    // =====================================================================
-    // (e) HINCRBY / HINCRBYFLOAT
-    // =====================================================================
-
     #[pyo3(signature = (key, field, amount))]
     fn hincrby(&self, py: Python<'_>, key: &str, field: &str, amount: i64) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
-            conn.hincrby(key, field, amount).await
-        });
-        py_int(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, field, amount))]
-    fn ahincrby(&self, py: Python<'_>, key: &str, field: &str, amount: i64) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         let field = field.to_string();
         async_op!(self, py, conn, async {
@@ -562,17 +719,8 @@ impl RedisRsDriver {
         })
     }
 
-    /// HINCRBYFLOAT — returns f64 directly (no String round-trip).
     #[pyo3(signature = (key, field, amount))]
-    fn hincrbyfloat(&self, py: Python<'_>, key: &str, field: &str, amount: f64) -> PyResult<f64> {
-        sync_op!(py, self, conn, async {
-            conn.hincrbyfloat(key, field, amount).await
-        })
-        .map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (key, field, amount))]
-    fn ahincrbyfloat(
+    fn hincrbyfloat(
         &self,
         py: Python<'_>,
         key: &str,
@@ -587,31 +735,8 @@ impl RedisRsDriver {
         })
     }
 
-    // =====================================================================
-    // (f) HSCAN
-    // =====================================================================
-
     #[pyo3(signature = (key, *, cursor=0, r#match=None, count=None, novalues=false))]
     fn hscan(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        cursor: u64,
-        r#match: Option<String>,
-        count: Option<i64>,
-        novalues: bool,
-    ) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<redis::Value> = sync_op!(py, self, conn, async {
-            conn.hscan_raw(key, cursor, r#match.as_deref(), count, novalues)
-                .await
-        });
-        let value = r.map_err(to_py_err)?;
-        let (cur, payload) = split_scan_reply(value)?;
-        render_hscan(py, cur, payload, novalues)
-    }
-
-    #[pyo3(signature = (key, *, cursor=0, r#match=None, count=None, novalues=false))]
-    fn ahscan(
         &self,
         py: Python<'_>,
         key: &str,
@@ -647,36 +772,9 @@ impl RedisRsDriver {
         Ok(awaitable.into_pyobject(py)?.into_any().unbind())
     }
 
-    // =====================================================================
-    // (g) Hash-field TTL family (Redis 7.4+)
-    // =====================================================================
-
-    // --- HEXPIRE -----------------------------------------------------------
-
     #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn hexpire(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        fields: Vec<String>,
-        time: i64,
-        nx: bool,
-        xx: bool,
-        gt: bool,
-        lt: bool,
-    ) -> PyResult<Py<PyAny>> {
-        let modifier = validate_ttl_modifiers(nx, xx, gt, lt)?;
-        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
-            conn.hexpire_family("HEXPIRE", key, &fields, time, modifier)
-                .await
-        });
-        int_list_to_py(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    fn ahexpire(
         &self,
         py: Python<'_>,
         key: &str,
@@ -697,32 +795,9 @@ impl RedisRsDriver {
         })
     }
 
-    // --- HPEXPIRE ----------------------------------------------------------
-
     #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn hpexpire(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        fields: Vec<String>,
-        time: i64,
-        nx: bool,
-        xx: bool,
-        gt: bool,
-        lt: bool,
-    ) -> PyResult<Py<PyAny>> {
-        let modifier = validate_ttl_modifiers(nx, xx, gt, lt)?;
-        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
-            conn.hexpire_family("HPEXPIRE", key, &fields, time, modifier)
-                .await
-        });
-        int_list_to_py(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    fn ahpexpire(
         &self,
         py: Python<'_>,
         key: &str,
@@ -743,32 +818,9 @@ impl RedisRsDriver {
         })
     }
 
-    // --- HEXPIREAT ---------------------------------------------------------
-
     #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn hexpireat(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        fields: Vec<String>,
-        time: i64,
-        nx: bool,
-        xx: bool,
-        gt: bool,
-        lt: bool,
-    ) -> PyResult<Py<PyAny>> {
-        let modifier = validate_ttl_modifiers(nx, xx, gt, lt)?;
-        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
-            conn.hexpire_family("HEXPIREAT", key, &fields, time, modifier)
-                .await
-        });
-        int_list_to_py(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    fn ahexpireat(
         &self,
         py: Python<'_>,
         key: &str,
@@ -789,32 +841,9 @@ impl RedisRsDriver {
         })
     }
 
-    // --- HPEXPIREAT --------------------------------------------------------
-
     #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn hpexpireat(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        fields: Vec<String>,
-        time: i64,
-        nx: bool,
-        xx: bool,
-        gt: bool,
-        lt: bool,
-    ) -> PyResult<Py<PyAny>> {
-        let modifier = validate_ttl_modifiers(nx, xx, gt, lt)?;
-        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
-            conn.hexpire_family("HPEXPIREAT", key, &fields, time, modifier)
-                .await
-        });
-        int_list_to_py(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    fn ahpexpireat(
         &self,
         py: Python<'_>,
         key: &str,
@@ -835,18 +864,8 @@ impl RedisRsDriver {
         })
     }
 
-    // --- HEXPIRETIME -------------------------------------------------------
-
     #[pyo3(signature = (key, fields))]
     fn hexpiretime(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
-            conn.httl_family("HEXPIRETIME", key, &fields).await
-        });
-        int_list_to_py(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, fields))]
-    fn ahexpiretime(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let r: redis::RedisResult<Vec<i64>> =
@@ -855,18 +874,8 @@ impl RedisRsDriver {
         })
     }
 
-    // --- HPEXPIRETIME ------------------------------------------------------
-
     #[pyo3(signature = (key, fields))]
     fn hpexpiretime(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
-            conn.httl_family("HPEXPIRETIME", key, &fields).await
-        });
-        int_list_to_py(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, fields))]
-    fn ahpexpiretime(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let r: redis::RedisResult<Vec<i64>> =
@@ -875,18 +884,8 @@ impl RedisRsDriver {
         })
     }
 
-    // --- HTTL --------------------------------------------------------------
-
     #[pyo3(signature = (key, fields))]
     fn httl(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
-            conn.httl_family("HTTL", key, &fields).await
-        });
-        int_list_to_py(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, fields))]
-    fn ahttl(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let r: redis::RedisResult<Vec<i64>> = conn.httl_family("HTTL", &key, &fields).await;
@@ -894,18 +893,8 @@ impl RedisRsDriver {
         })
     }
 
-    // --- HPTTL -------------------------------------------------------------
-
     #[pyo3(signature = (key, fields))]
     fn hpttl(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
-            conn.httl_family("HPTTL", key, &fields).await
-        });
-        int_list_to_py(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, fields))]
-    fn ahpttl(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let r: redis::RedisResult<Vec<i64>> = conn.httl_family("HPTTL", &key, &fields).await;
@@ -913,18 +902,8 @@ impl RedisRsDriver {
         })
     }
 
-    // --- HPERSIST ----------------------------------------------------------
-
     #[pyo3(signature = (key, fields))]
     fn hpersist(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<Vec<i64>> = sync_op!(py, self, conn, async {
-            conn.httl_family("HPERSIST", key, &fields).await
-        });
-        int_list_to_py(py, r.map_err(to_py_err)?)
-    }
-
-    #[pyo3(signature = (key, fields))]
-    fn ahpersist(&self, py: Python<'_>, key: &str, fields: Vec<String>) -> PyResult<Py<PyAny>> {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let r: redis::RedisResult<Vec<i64>> = conn.httl_family("HPERSIST", &key, &fields).await;

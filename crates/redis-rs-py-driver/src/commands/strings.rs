@@ -1,21 +1,41 @@
-// String / key commands.
+// String / key commands — impl Redis (sync) + impl AsyncRedis (async).
 //
-// Every method exists as a sync + async pair:
-//   * `<cmd>(...)` — sync; releases the GIL via py.detach.
-//   * `a<cmd>(...)` — async; returns a RedisRsAwaitable.
-//
-// Shared helpers live in driver.rs (macros) and connection.rs
-// (per-command async fns on ValkeyConnInner).
+// Sync methods keep their original names and bodies.
+// Async methods: original `a<cmd>` bodies are exposed as `<cmd>` on AsyncRedis.
 
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyList, PyTuple};
 
 use crate::async_bridge::RawResult;
-use crate::driver::{RedisRsDriver, py_opt_bytes};
 use crate::errors::{classify_error, to_py_err};
 use crate::exceptions::DataError;
+use crate::facade::asyncio_mod::AsyncRedis;
+use crate::facade::sync::Redis;
+use crate::helpers::py_opt_bytes;
 use crate::raw_result::IntoRawResult;
 use crate::{async_op, sync_op};
+
+/// Normalise the variadic `*keys` tuple that `mget` receives.
+///
+/// Redis-py supports two call styles:
+///   `mget("a", "b")` — multiple positional strings
+///   `mget(["a", "b"])` — a single list argument
+///
+/// PyO3's `*keys` collects all positional args into a `PyTuple`. If that
+/// tuple contains exactly one element that is itself a list or tuple, we
+/// unwrap it so both call styles produce the same `Vec<String>`.
+fn flatten_mget_keys(keys: &Bound<'_, PyTuple>) -> PyResult<Vec<String>> {
+    if keys.len() == 1 {
+        let first = keys.get_item(0)?;
+        if first.is_instance_of::<PyList>() || first.is_instance_of::<PyTuple>() {
+            return first
+                .try_iter()?
+                .map(|item| item?.extract::<String>())
+                .collect();
+        }
+    }
+    keys.iter().map(|k| k.extract::<String>()).collect()
+}
 
 // =========================================================================
 // Validation helpers shared by sync + async SET paths.
@@ -64,25 +84,32 @@ fn validate_expire_flags(nx: bool, xx: bool, gt: bool, lt: bool) -> PyResult<()>
 
 fn set_value_to_py(py: Python<'_>, v: redis::Value, get: bool) -> PyResult<Py<PyAny>> {
     match v {
-        // Plain SET succeeded — `OK` / `SimpleString("OK")`.
         redis::Value::Okay => Ok(true.into_pyobject(py)?.to_owned().into_any().unbind()),
         redis::Value::SimpleString(s) if s == "OK" => {
             Ok(true.into_pyobject(py)?.to_owned().into_any().unbind())
         }
-        // Either the NX/XX predicate failed, or GET on a missing key.
         redis::Value::Nil => Ok(py.None()),
-        // GET=true and key existed → previous bytes.
         redis::Value::BulkString(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
-        // Defensive: any other shape we treat as "OK" if we expected a write,
-        // or "None" if we expected a GET. Should not happen with current Redis.
         _ if get => Ok(py.None()),
         _ => Ok(true.into_pyobject(py)?.to_owned().into_any().unbind()),
     }
 }
 
+// =========================================================================
+// Sync — redis_rs_py.Redis
+// =========================================================================
+
 #[pymethods]
-impl RedisRsDriver {
-    // ----- SET / aset -----------------------------------------------------
+impl Redis {
+    // ----- GET / SET -------------------------------------------------------
+
+    fn get(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        use redis::AsyncCommands;
+        let r: Result<Option<Vec<u8>>, _> = sync_op!(py, self, conn, async {
+            crate::conn_method!(&mut *conn, c, c.get(key))
+        });
+        Ok(py_opt_bytes(py, r.map_err(crate::errors::to_py_err)?))
+    }
 
     #[pyo3(signature = (
         name,
@@ -122,54 +149,48 @@ impl RedisRsDriver {
         set_value_to_py(py, v, get)
     }
 
-    #[pyo3(signature = (
-        name,
-        value,
-        *,
-        ex = None,
-        px = None,
-        nx = false,
-        xx = false,
-        keepttl = false,
-        get = false,
-        exat = None,
-        pxat = None,
-    ))]
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    fn aset(
-        &self,
-        py: Python<'_>,
-        name: &str,
-        value: &[u8],
-        ex: Option<u64>,
-        px: Option<u64>,
-        nx: bool,
-        xx: bool,
-        keepttl: bool,
-        get: bool,
-        exat: Option<i64>,
-        pxat: Option<i64>,
-    ) -> PyResult<Py<PyAny>> {
-        validate_set_kwargs(ex, px, exat, pxat, nx, xx, keepttl)?;
-        let name = name.to_string();
-        let value = value.to_vec();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<redis::Value> = conn
-                .set_full(&name, value, ex, px, exat, pxat, nx, xx, keepttl, get)
-                .await;
-            match r {
-                Ok(redis::Value::Okay) => RawResult::Bool(true),
-                Ok(redis::Value::SimpleString(ref s)) if s == "OK" => RawResult::Bool(true),
-                Ok(redis::Value::Nil) => RawResult::Nil,
-                Ok(redis::Value::BulkString(b)) => RawResult::OptBytes(Some(b)),
-                Ok(_) if get => RawResult::Nil,
-                Ok(_) => RawResult::Bool(true),
-                Err(e) => RawResult::Error(classify_error(&e), e.to_string()),
-            }
-        })
+    // ----- DELETE (varargs) ------------------------------------------------
+
+    #[pyo3(signature = (*keys))]
+    fn delete(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<i64> {
+        use redis::AsyncCommands;
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        let r: redis::RedisResult<i64> = sync_op!(py, self, conn, async {
+            crate::conn_method!(&mut *conn, c, c.del(&keys))
+        });
+        r.map_err(to_py_err)
     }
 
-    // ----- GETEX / aGETEX -------------------------------------------------
+    // ----- PING ------------------------------------------------------------
+
+    #[pyo3(signature = (*, message=None))]
+    fn ping(&self, py: Python<'_>, message: Option<String>) -> PyResult<Py<PyAny>> {
+        use crate::helpers::py_bool;
+        match message {
+            None => {
+                let r: redis::RedisResult<String> = sync_op!(py, self, conn, async {
+                    crate::dispatch_cmd!(&mut *conn, redis::cmd("PING"))
+                });
+                match r {
+                    Ok(s) => py_bool(py, s == "PONG"),
+                    Err(e) => Err(to_py_err(e)),
+                }
+            }
+            Some(msg) => {
+                let mut cmd = redis::cmd("PING");
+                cmd.arg(msg);
+                let r: redis::RedisResult<Vec<u8>> = sync_op!(py, self, conn, async {
+                    crate::dispatch_cmd!(&mut *conn, cmd)
+                });
+                let bytes = r.map_err(to_py_err)?;
+                Ok(PyBytes::new(py, &bytes).into_any().unbind())
+            }
+        }
+    }
+
+    // ----- GETEX -----------------------------------------------------------
 
     #[pyo3(signature = (
         name,
@@ -211,6 +232,418 @@ impl RedisRsDriver {
         Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
     }
 
+    // ----- GETDEL ----------------------------------------------------------
+
+    fn getdel(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<Option<Vec<u8>>> =
+            sync_op!(py, self, conn, async { conn.getdel(name).await });
+        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+    }
+
+    // ----- GETRANGE --------------------------------------------------------
+
+    fn getrange(&self, py: Python<'_>, name: &str, start: i64, end: i64) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<Vec<u8>> = sync_op!(py, self, conn, async {
+            conn.getrange(name, start, end).await
+        });
+        Ok(PyBytes::new(py, &r.map_err(to_py_err)?).into_any().unbind())
+    }
+
+    // ----- SETRANGE --------------------------------------------------------
+
+    fn setrange(&self, py: Python<'_>, name: &str, offset: i64, value: &[u8]) -> PyResult<i64> {
+        sync_op!(py, self, conn, async {
+            conn.setrange(name, offset, value).await
+        })
+        .map_err(to_py_err)
+    }
+
+    // ----- STRLEN ----------------------------------------------------------
+
+    fn strlen(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
+        sync_op!(py, self, conn, async { conn.strlen(name).await }).map_err(to_py_err)
+    }
+
+    // ----- APPEND ----------------------------------------------------------
+
+    fn append(&self, py: Python<'_>, name: &str, value: &[u8]) -> PyResult<i64> {
+        sync_op!(py, self, conn, async { conn.append(name, value).await }).map_err(to_py_err)
+    }
+
+    // ----- MGET ------------------------------------------------------------
+
+    #[pyo3(signature = (*keys))]
+    fn mget<'py>(&self, py: Python<'py>, keys: &Bound<'py, PyTuple>) -> PyResult<Py<PyAny>> {
+        let key_strs = flatten_mget_keys(keys)?;
+        let r: redis::RedisResult<Vec<Option<Vec<u8>>>> =
+            sync_op!(py, self, conn, async { conn.mget(&key_strs).await });
+        let v = r.map_err(to_py_err)?;
+        let py_items: Vec<Py<PyAny>> = v
+            .into_iter()
+            .map(|o| match o {
+                Some(b) => PyBytes::new(py, &b).into_any().unbind(),
+                None => py.None(),
+            })
+            .collect();
+        Ok(pyo3::types::PyList::new(py, py_items)?.into_any().unbind())
+    }
+
+    // ----- MSET ------------------------------------------------------------
+
+    fn mset(
+        &self,
+        py: Python<'_>,
+        mapping: std::collections::HashMap<String, Vec<u8>>,
+    ) -> PyResult<()> {
+        let entries: Vec<(String, Vec<u8>)> = mapping.into_iter().collect();
+        sync_op!(py, self, conn, async { conn.mset(&entries).await }).map_err(to_py_err)
+    }
+
+    // ----- MSETNX ----------------------------------------------------------
+
+    fn msetnx(
+        &self,
+        py: Python<'_>,
+        mapping: std::collections::HashMap<String, Vec<u8>>,
+    ) -> PyResult<bool> {
+        let entries: Vec<(String, Vec<u8>)> = mapping.into_iter().collect();
+        sync_op!(py, self, conn, async { conn.msetnx(&entries).await }).map_err(to_py_err)
+    }
+
+    // ----- INCR / INCRBY / INCRBYFLOAT ------------------------------------
+
+    fn incr(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
+        sync_op!(py, self, conn, async { conn.incr(name).await }).map_err(to_py_err)
+    }
+
+    fn incrby(&self, py: Python<'_>, name: &str, amount: i64) -> PyResult<i64> {
+        sync_op!(py, self, conn, async { conn.incrby(name, amount).await }).map_err(to_py_err)
+    }
+
+    fn incrbyfloat(&self, py: Python<'_>, name: &str, amount: f64) -> PyResult<f64> {
+        sync_op!(py, self, conn, async {
+            conn.incrbyfloat(name, amount).await
+        })
+        .map_err(to_py_err)
+    }
+
+    // ----- DECR / DECRBY --------------------------------------------------
+
+    fn decr(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
+        sync_op!(py, self, conn, async { conn.decr(name).await }).map_err(to_py_err)
+    }
+
+    fn decrby(&self, py: Python<'_>, name: &str, amount: i64) -> PyResult<i64> {
+        sync_op!(py, self, conn, async { conn.decrby(name, amount).await }).map_err(to_py_err)
+    }
+
+    // ----- EXISTS (variadic) -----------------------------------------------
+
+    #[pyo3(signature = (*names))]
+    fn exists(&self, py: Python<'_>, names: Vec<String>) -> PyResult<i64> {
+        if names.is_empty() {
+            return Ok(0);
+        }
+        sync_op!(py, self, conn, async { conn.exists_many(&names).await }).map_err(to_py_err)
+    }
+
+    // ----- UNLINK (variadic) -----------------------------------------------
+
+    #[pyo3(signature = (*names))]
+    fn unlink(&self, py: Python<'_>, names: Vec<String>) -> PyResult<i64> {
+        if names.is_empty() {
+            return Ok(0);
+        }
+        sync_op!(py, self, conn, async { conn.unlink_many(&names).await }).map_err(to_py_err)
+    }
+
+    // ----- EXPIRE family --------------------------------------------------
+
+    #[pyo3(signature = (name, time, *, nx = false, xx = false, gt = false, lt = false))]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn expire(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        time: i64,
+        nx: bool,
+        xx: bool,
+        gt: bool,
+        lt: bool,
+    ) -> PyResult<bool> {
+        validate_expire_flags(nx, xx, gt, lt)?;
+        sync_op!(py, self, conn, async {
+            conn.expire_full(name, time, nx, xx, gt, lt).await
+        })
+        .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (name, time, *, nx = false, xx = false, gt = false, lt = false))]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn pexpire(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        time: i64,
+        nx: bool,
+        xx: bool,
+        gt: bool,
+        lt: bool,
+    ) -> PyResult<bool> {
+        validate_expire_flags(nx, xx, gt, lt)?;
+        sync_op!(py, self, conn, async {
+            conn.pexpire_full(name, time, nx, xx, gt, lt).await
+        })
+        .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (name, when, *, nx = false, xx = false, gt = false, lt = false))]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn expireat(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        when: i64,
+        nx: bool,
+        xx: bool,
+        gt: bool,
+        lt: bool,
+    ) -> PyResult<bool> {
+        validate_expire_flags(nx, xx, gt, lt)?;
+        sync_op!(py, self, conn, async {
+            conn.expireat_full(name, when, nx, xx, gt, lt).await
+        })
+        .map_err(to_py_err)
+    }
+
+    #[pyo3(signature = (name, when, *, nx = false, xx = false, gt = false, lt = false))]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn pexpireat(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        when: i64,
+        nx: bool,
+        xx: bool,
+        gt: bool,
+        lt: bool,
+    ) -> PyResult<bool> {
+        validate_expire_flags(nx, xx, gt, lt)?;
+        sync_op!(py, self, conn, async {
+            conn.pexpireat_full(name, when, nx, xx, gt, lt).await
+        })
+        .map_err(to_py_err)
+    }
+
+    // ----- TTL family -----------------------------------------------------
+
+    fn ttl(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
+        sync_op!(py, self, conn, async { conn.ttl(name).await }).map_err(to_py_err)
+    }
+
+    fn pttl(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
+        sync_op!(py, self, conn, async { conn.pttl(name).await }).map_err(to_py_err)
+    }
+
+    fn expiretime(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
+        sync_op!(py, self, conn, async { conn.expiretime(name).await }).map_err(to_py_err)
+    }
+
+    fn pexpiretime(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
+        sync_op!(py, self, conn, async { conn.pexpiretime(name).await }).map_err(to_py_err)
+    }
+
+    fn persist(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
+        sync_op!(py, self, conn, async { conn.persist(name).await }).map_err(to_py_err)
+    }
+
+    // ----- RENAME ---------------------------------------------------------
+
+    fn rename(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<()> {
+        sync_op!(py, self, conn, async { conn.rename(src, dst).await }).map_err(to_py_err)
+    }
+
+    fn renamenx(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<bool> {
+        sync_op!(py, self, conn, async { conn.renamenx(src, dst).await }).map_err(to_py_err)
+    }
+
+    // ----- TYPE -----------------------------------------------------------
+
+    #[pyo3(name = "type")]
+    fn type_(&self, py: Python<'_>, name: &str) -> PyResult<String> {
+        sync_op!(py, self, conn, async { conn.key_type(name).await }).map_err(to_py_err)
+    }
+
+    fn key_type(&self, py: Python<'_>, name: &str) -> PyResult<String> {
+        sync_op!(py, self, conn, async { conn.key_type(name).await }).map_err(to_py_err)
+    }
+
+    // ----- COPY -----------------------------------------------------------
+
+    #[pyo3(signature = (source, destination, *, db = None, replace = false))]
+    fn copy(
+        &self,
+        py: Python<'_>,
+        source: &str,
+        destination: &str,
+        db: Option<i64>,
+        replace: bool,
+    ) -> PyResult<bool> {
+        sync_op!(py, self, conn, async {
+            conn.copy(source, destination, db, replace).await
+        })
+        .map_err(to_py_err)
+    }
+
+    // ----- DUMP -----------------------------------------------------------
+
+    fn dump(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+        let r: redis::RedisResult<Option<Vec<u8>>> =
+            sync_op!(py, self, conn, async { conn.dump(name).await });
+        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+    }
+
+    // ----- RESTORE --------------------------------------------------------
+
+    #[pyo3(signature = (
+        name,
+        ttl,
+        value,
+        *,
+        replace = false,
+        absttl = false,
+        idletime = None,
+        frequency = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn restore(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        ttl: i64,
+        value: &[u8],
+        replace: bool,
+        absttl: bool,
+        idletime: Option<u64>,
+        frequency: Option<u64>,
+    ) -> PyResult<bool> {
+        sync_op!(py, self, conn, async {
+            conn.restore(name, ttl, value, replace, absttl, idletime, frequency)
+                .await
+        })
+        .map_err(to_py_err)?;
+        Ok(true)
+    }
+}
+
+// =========================================================================
+// Async — redis_rs_py.asyncio.Redis
+// =========================================================================
+
+#[pymethods]
+impl AsyncRedis {
+    // ----- GET / SET -------------------------------------------------------
+
+    fn get(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        let key = key.to_string();
+        async_op!(self, py, conn, async {
+            use redis::AsyncCommands;
+            let r: redis::RedisResult<Option<Vec<u8>>> =
+                crate::conn_method!(&mut *conn, c, c.get(&key));
+            r.into_raw_result()
+        })
+    }
+
+    #[pyo3(signature = (
+        name,
+        value,
+        *,
+        ex = None,
+        px = None,
+        nx = false,
+        xx = false,
+        keepttl = false,
+        get = false,
+        exat = None,
+        pxat = None,
+    ))]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn set(
+        &self,
+        py: Python<'_>,
+        name: &str,
+        value: &[u8],
+        ex: Option<u64>,
+        px: Option<u64>,
+        nx: bool,
+        xx: bool,
+        keepttl: bool,
+        get: bool,
+        exat: Option<i64>,
+        pxat: Option<i64>,
+    ) -> PyResult<Py<PyAny>> {
+        validate_set_kwargs(ex, px, exat, pxat, nx, xx, keepttl)?;
+        let name = name.to_string();
+        let value = value.to_vec();
+        async_op!(self, py, conn, async {
+            let r: redis::RedisResult<redis::Value> = conn
+                .set_full(&name, value, ex, px, exat, pxat, nx, xx, keepttl, get)
+                .await;
+            match r {
+                Ok(redis::Value::Okay) => RawResult::Bool(true),
+                Ok(redis::Value::SimpleString(ref s)) if s == "OK" => RawResult::Bool(true),
+                Ok(redis::Value::Nil) => RawResult::Nil,
+                Ok(redis::Value::BulkString(b)) => RawResult::OptBytes(Some(b)),
+                Ok(_) if get => RawResult::Nil,
+                Ok(_) => RawResult::Bool(true),
+                Err(e) => RawResult::Error(classify_error(&e), e.to_string()),
+            }
+        })
+    }
+
+    // ----- DELETE (varargs) ------------------------------------------------
+
+    #[pyo3(signature = (*keys))]
+    fn delete(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            if keys.is_empty() {
+                return RawResult::Int(0);
+            }
+            use redis::AsyncCommands;
+            let r: redis::RedisResult<i64> = crate::conn_method!(&mut *conn, c, c.del(&keys));
+            r.into_raw_result()
+        })
+    }
+
+    // ----- PING ------------------------------------------------------------
+
+    #[pyo3(signature = (*, message=None))]
+    fn ping(&self, py: Python<'_>, message: Option<String>) -> PyResult<Py<PyAny>> {
+        async_op!(self, py, conn, async {
+            match message {
+                None => {
+                    let r: redis::RedisResult<String> =
+                        crate::dispatch_cmd!(&mut *conn, redis::cmd("PING"));
+                    match r {
+                        Ok(s) => RawResult::Bool(s == "PONG"),
+                        Err(e) => crate::errors::classify(e),
+                    }
+                }
+                Some(msg) => {
+                    let mut cmd = redis::cmd("PING");
+                    cmd.arg(&msg);
+                    let r: redis::RedisResult<Vec<u8>> = crate::dispatch_cmd!(&mut *conn, cmd);
+                    match r {
+                        Ok(b) => RawResult::OptBytes(Some(b)),
+                        Err(e) => crate::errors::classify(e),
+                    }
+                }
+            }
+        })
+    }
+
+    // ----- GETEX -----------------------------------------------------------
+
     #[pyo3(signature = (
         name,
         *,
@@ -221,7 +654,7 @@ impl RedisRsDriver {
         persist = false,
     ))]
     #[allow(clippy::too_many_arguments)]
-    fn agetex(
+    fn getex(
         &self,
         py: Python<'_>,
         name: &str,
@@ -253,31 +686,18 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- GETDEL / aGETDEL ----------------------------------------------
+    // ----- GETDEL ----------------------------------------------------------
 
     fn getdel(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<Option<Vec<u8>>> =
-            sync_op!(py, self, conn, async { conn.getdel(name).await });
-        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
-    }
-
-    fn agetdel(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.getdel(&name).await.into_raw_result()
         })
     }
 
-    // ----- GETRANGE / aGETRANGE ------------------------------------------
+    // ----- GETRANGE --------------------------------------------------------
 
     fn getrange(&self, py: Python<'_>, name: &str, start: i64, end: i64) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<Vec<u8>> = sync_op!(py, self, conn, async {
-            conn.getrange(name, start, end).await
-        });
-        Ok(PyBytes::new(py, &r.map_err(to_py_err)?).into_any().unbind())
-    }
-
-    fn agetrange(&self, py: Python<'_>, name: &str, start: i64, end: i64) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             match conn.getrange(&name, start, end).await {
@@ -287,16 +707,9 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- SETRANGE / aSETRANGE ------------------------------------------
+    // ----- SETRANGE --------------------------------------------------------
 
-    fn setrange(&self, py: Python<'_>, name: &str, offset: i64, value: &[u8]) -> PyResult<i64> {
-        sync_op!(py, self, conn, async {
-            conn.setrange(name, offset, value).await
-        })
-        .map_err(to_py_err)
-    }
-
-    fn asetrange(
+    fn setrange(
         &self,
         py: Python<'_>,
         name: &str,
@@ -310,26 +723,18 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- STRLEN / aSTRLEN ----------------------------------------------
+    // ----- STRLEN ----------------------------------------------------------
 
-    fn strlen(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.strlen(name).await }).map_err(to_py_err)
-    }
-
-    fn astrlen(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn strlen(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.strlen(&name).await.into_raw_result()
         })
     }
 
-    // ----- APPEND / aAPPEND ----------------------------------------------
+    // ----- APPEND ----------------------------------------------------------
 
-    fn append(&self, py: Python<'_>, name: &str, value: &[u8]) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.append(name, value).await }).map_err(to_py_err)
-    }
-
-    fn aappend(&self, py: Python<'_>, name: &str, value: &[u8]) -> PyResult<Py<PyAny>> {
+    fn append(&self, py: Python<'_>, name: &str, value: &[u8]) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         let value = value.to_vec();
         async_op!(self, py, conn, async {
@@ -337,40 +742,19 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- MGET / aMGET --------------------------------------------------
+    // ----- MGET ------------------------------------------------------------
 
-    fn mget(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<Vec<Option<Vec<u8>>>> =
-            sync_op!(py, self, conn, async { conn.mget(&keys).await });
-        let v = r.map_err(to_py_err)?;
-        let py_items: Vec<Py<PyAny>> = v
-            .into_iter()
-            .map(|o| match o {
-                Some(b) => PyBytes::new(py, &b).into_any().unbind(),
-                None => py.None(),
-            })
-            .collect();
-        Ok(pyo3::types::PyList::new(py, py_items)?.into_any().unbind())
-    }
-
-    fn amget(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (*keys))]
+    fn mget<'py>(&self, py: Python<'py>, keys: &Bound<'py, PyTuple>) -> PyResult<Py<PyAny>> {
+        let key_strs = flatten_mget_keys(keys)?;
         async_op!(self, py, conn, async {
-            conn.mget(&keys).await.into_raw_result()
+            conn.mget(&key_strs).await.into_raw_result()
         })
     }
 
-    // ----- MSET / aMSET --------------------------------------------------
+    // ----- MSET ------------------------------------------------------------
 
     fn mset(
-        &self,
-        py: Python<'_>,
-        mapping: std::collections::HashMap<String, Vec<u8>>,
-    ) -> PyResult<()> {
-        let entries: Vec<(String, Vec<u8>)> = mapping.into_iter().collect();
-        sync_op!(py, self, conn, async { conn.mset(&entries).await }).map_err(to_py_err)
-    }
-
-    fn amset(
         &self,
         py: Python<'_>,
         mapping: std::collections::HashMap<String, Vec<u8>>,
@@ -381,18 +765,9 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- MSETNX / aMSETNX ----------------------------------------------
+    // ----- MSETNX ----------------------------------------------------------
 
     fn msetnx(
-        &self,
-        py: Python<'_>,
-        mapping: std::collections::HashMap<String, Vec<u8>>,
-    ) -> PyResult<bool> {
-        let entries: Vec<(String, Vec<u8>)> = mapping.into_iter().collect();
-        sync_op!(py, self, conn, async { conn.msetnx(&entries).await }).map_err(to_py_err)
-    }
-
-    fn amsetnx(
         &self,
         py: Python<'_>,
         mapping: std::collections::HashMap<String, Vec<u8>>,
@@ -403,86 +778,49 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- INCR / aINCR --------------------------------------------------
+    // ----- INCR / INCRBY / INCRBYFLOAT ------------------------------------
 
-    fn incr(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.incr(name).await }).map_err(to_py_err)
-    }
-
-    fn aincr(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn incr(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.incr(&name).await.into_raw_result()
         })
     }
 
-    // ----- INCRBY / aINCRBY ----------------------------------------------
-
-    fn incrby(&self, py: Python<'_>, name: &str, amount: i64) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.incrby(name, amount).await }).map_err(to_py_err)
-    }
-
-    fn aincrby(&self, py: Python<'_>, name: &str, amount: i64) -> PyResult<Py<PyAny>> {
+    fn incrby(&self, py: Python<'_>, name: &str, amount: i64) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.incrby(&name, amount).await.into_raw_result()
         })
     }
 
-    // ----- INCRBYFLOAT / aINCRBYFLOAT ------------------------------------
-
-    fn incrbyfloat(&self, py: Python<'_>, name: &str, amount: f64) -> PyResult<f64> {
-        sync_op!(py, self, conn, async {
-            conn.incrbyfloat(name, amount).await
-        })
-        .map_err(to_py_err)
-    }
-
-    fn aincrbyfloat(&self, py: Python<'_>, name: &str, amount: f64) -> PyResult<Py<PyAny>> {
+    fn incrbyfloat(&self, py: Python<'_>, name: &str, amount: f64) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.incrbyfloat(&name, amount).await.into_raw_result()
         })
     }
 
-    // ----- DECR / aDECR --------------------------------------------------
+    // ----- DECR / DECRBY --------------------------------------------------
 
-    fn decr(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.decr(name).await }).map_err(to_py_err)
-    }
-
-    fn adecr(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn decr(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.decr(&name).await.into_raw_result()
         })
     }
 
-    // ----- DECRBY / aDECRBY ----------------------------------------------
-
-    fn decrby(&self, py: Python<'_>, name: &str, amount: i64) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.decrby(name, amount).await }).map_err(to_py_err)
-    }
-
-    fn adecrby(&self, py: Python<'_>, name: &str, amount: i64) -> PyResult<Py<PyAny>> {
+    fn decrby(&self, py: Python<'_>, name: &str, amount: i64) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.decrby(&name, amount).await.into_raw_result()
         })
     }
 
-    // ----- EXISTS / aEXISTS (variadic) -----------------------------------
+    // ----- EXISTS (variadic) -----------------------------------------------
 
     #[pyo3(signature = (*names))]
-    fn exists(&self, py: Python<'_>, names: Vec<String>) -> PyResult<i64> {
-        if names.is_empty() {
-            return Ok(0);
-        }
-        sync_op!(py, self, conn, async { conn.exists_many(&names).await }).map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (*names))]
-    fn aexists(&self, py: Python<'_>, names: Vec<String>) -> PyResult<Py<PyAny>> {
+    fn exists(&self, py: Python<'_>, names: Vec<String>) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             if names.is_empty() {
                 return RawResult::Int(0);
@@ -491,18 +829,10 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- UNLINK / aUNLINK (variadic) -----------------------------------
+    // ----- UNLINK (variadic) -----------------------------------------------
 
     #[pyo3(signature = (*names))]
-    fn unlink(&self, py: Python<'_>, names: Vec<String>) -> PyResult<i64> {
-        if names.is_empty() {
-            return Ok(0);
-        }
-        sync_op!(py, self, conn, async { conn.unlink_many(&names).await }).map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (*names))]
-    fn aunlink(&self, py: Python<'_>, names: Vec<String>) -> PyResult<Py<PyAny>> {
+    fn unlink(&self, py: Python<'_>, names: Vec<String>) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
             if names.is_empty() {
                 return RawResult::Int(0);
@@ -511,30 +841,11 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- EXPIRE family -------------------------------------------------
+    // ----- EXPIRE family --------------------------------------------------
 
     #[pyo3(signature = (name, time, *, nx = false, xx = false, gt = false, lt = false))]
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn expire(
-        &self,
-        py: Python<'_>,
-        name: &str,
-        time: i64,
-        nx: bool,
-        xx: bool,
-        gt: bool,
-        lt: bool,
-    ) -> PyResult<bool> {
-        validate_expire_flags(nx, xx, gt, lt)?;
-        sync_op!(py, self, conn, async {
-            conn.expire_full(name, time, nx, xx, gt, lt).await
-        })
-        .map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (name, time, *, nx = false, xx = false, gt = false, lt = false))]
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    fn aexpire(
         &self,
         py: Python<'_>,
         name: &str,
@@ -564,25 +875,6 @@ impl RedisRsDriver {
         xx: bool,
         gt: bool,
         lt: bool,
-    ) -> PyResult<bool> {
-        validate_expire_flags(nx, xx, gt, lt)?;
-        sync_op!(py, self, conn, async {
-            conn.pexpire_full(name, time, nx, xx, gt, lt).await
-        })
-        .map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (name, time, *, nx = false, xx = false, gt = false, lt = false))]
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    fn apexpire(
-        &self,
-        py: Python<'_>,
-        name: &str,
-        time: i64,
-        nx: bool,
-        xx: bool,
-        gt: bool,
-        lt: bool,
     ) -> PyResult<Py<PyAny>> {
         validate_expire_flags(nx, xx, gt, lt)?;
         let name = name.to_string();
@@ -596,25 +888,6 @@ impl RedisRsDriver {
     #[pyo3(signature = (name, when, *, nx = false, xx = false, gt = false, lt = false))]
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn expireat(
-        &self,
-        py: Python<'_>,
-        name: &str,
-        when: i64,
-        nx: bool,
-        xx: bool,
-        gt: bool,
-        lt: bool,
-    ) -> PyResult<bool> {
-        validate_expire_flags(nx, xx, gt, lt)?;
-        sync_op!(py, self, conn, async {
-            conn.expireat_full(name, when, nx, xx, gt, lt).await
-        })
-        .map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (name, when, *, nx = false, xx = false, gt = false, lt = false))]
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    fn aexpireat(
         &self,
         py: Python<'_>,
         name: &str,
@@ -644,25 +917,6 @@ impl RedisRsDriver {
         xx: bool,
         gt: bool,
         lt: bool,
-    ) -> PyResult<bool> {
-        validate_expire_flags(nx, xx, gt, lt)?;
-        sync_op!(py, self, conn, async {
-            conn.pexpireat_full(name, when, nx, xx, gt, lt).await
-        })
-        .map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (name, when, *, nx = false, xx = false, gt = false, lt = false))]
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    fn apexpireat(
-        &self,
-        py: Python<'_>,
-        name: &str,
-        when: i64,
-        nx: bool,
-        xx: bool,
-        gt: bool,
-        lt: bool,
     ) -> PyResult<Py<PyAny>> {
         validate_expire_flags(nx, xx, gt, lt)?;
         let name = name.to_string();
@@ -673,70 +927,46 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- TTL / aTTL ----------------------------------------------------
+    // ----- TTL family -----------------------------------------------------
 
-    fn ttl(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.ttl(name).await }).map_err(to_py_err)
-    }
-
-    fn attl(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn ttl(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.ttl(&name).await.into_raw_result()
         })
     }
 
-    fn pttl(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.pttl(name).await }).map_err(to_py_err)
-    }
-
-    fn apttl(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn pttl(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.pttl(&name).await.into_raw_result()
         })
     }
 
-    fn expiretime(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.expiretime(name).await }).map_err(to_py_err)
-    }
-
-    fn aexpiretime(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn expiretime(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.expiretime(&name).await.into_raw_result()
         })
     }
 
-    fn pexpiretime(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.pexpiretime(name).await }).map_err(to_py_err)
-    }
-
-    fn apexpiretime(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn pexpiretime(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.pexpiretime(&name).await.into_raw_result()
         })
     }
 
-    fn persist(&self, py: Python<'_>, name: &str) -> PyResult<bool> {
-        sync_op!(py, self, conn, async { conn.persist(name).await }).map_err(to_py_err)
-    }
-
-    fn apersist(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn persist(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.persist(&name).await.into_raw_result()
         })
     }
 
-    // ----- RENAME / aRENAME ----------------------------------------------
+    // ----- RENAME ---------------------------------------------------------
 
-    fn rename(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<()> {
-        sync_op!(py, self, conn, async { conn.rename(src, dst).await }).map_err(to_py_err)
-    }
-
-    fn arename(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<Py<PyAny>> {
+    fn rename(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<Py<PyAny>> {
         let src = src.to_string();
         let dst = dst.to_string();
         async_op!(self, py, conn, async {
@@ -744,11 +974,7 @@ impl RedisRsDriver {
         })
     }
 
-    fn renamenx(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<bool> {
-        sync_op!(py, self, conn, async { conn.renamenx(src, dst).await }).map_err(to_py_err)
-    }
-
-    fn arenamenx(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<Py<PyAny>> {
+    fn renamenx(&self, py: Python<'_>, src: &str, dst: &str) -> PyResult<Py<PyAny>> {
         let src = src.to_string();
         let dst = dst.to_string();
         async_op!(self, py, conn, async {
@@ -756,56 +982,27 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- TYPE / aTYPE --------------------------------------------------
-    //
-    // `type` is a Python keyword (and a Rust keyword). We expose two names:
-    //   * `type` — matches redis-py exactly (call via getattr in Python).
-    //   * `key_type` — convenience alias for codebases that prefer not to
-    //     use getattr.
+    // ----- TYPE -----------------------------------------------------------
 
     #[pyo3(name = "type")]
-    fn type_(&self, py: Python<'_>, name: &str) -> PyResult<String> {
-        sync_op!(py, self, conn, async { conn.key_type(name).await }).map_err(to_py_err)
-    }
-
-    fn key_type(&self, py: Python<'_>, name: &str) -> PyResult<String> {
-        sync_op!(py, self, conn, async { conn.key_type(name).await }).map_err(to_py_err)
-    }
-
-    #[pyo3(name = "atype")]
-    fn atype_(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn type_(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.key_type(&name).await.into_raw_result()
         })
     }
 
-    fn akey_type(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
+    fn key_type(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.key_type(&name).await.into_raw_result()
         })
     }
 
-    // ----- COPY / aCOPY --------------------------------------------------
+    // ----- COPY -----------------------------------------------------------
 
     #[pyo3(signature = (source, destination, *, db = None, replace = false))]
     fn copy(
-        &self,
-        py: Python<'_>,
-        source: &str,
-        destination: &str,
-        db: Option<i64>,
-        replace: bool,
-    ) -> PyResult<bool> {
-        sync_op!(py, self, conn, async {
-            conn.copy(source, destination, db, replace).await
-        })
-        .map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (source, destination, *, db = None, replace = false))]
-    fn acopy(
         &self,
         py: Python<'_>,
         source: &str,
@@ -822,25 +1019,16 @@ impl RedisRsDriver {
         })
     }
 
-    // ----- DUMP / aDUMP --------------------------------------------------
+    // ----- DUMP -----------------------------------------------------------
 
     fn dump(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
-        let r: redis::RedisResult<Option<Vec<u8>>> =
-            sync_op!(py, self, conn, async { conn.dump(name).await });
-        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
-    }
-
-    fn adump(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
             conn.dump(&name).await.into_raw_result()
         })
     }
 
-    // ----- RESTORE / aRESTORE --------------------------------------------
-    //
-    // Returns True on OK to keep parity with the boolean return shape used
-    // throughout the driver — redis-py returns the literal string "OK".
+    // ----- RESTORE --------------------------------------------------------
 
     #[pyo3(signature = (
         name,
@@ -854,36 +1042,6 @@ impl RedisRsDriver {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn restore(
-        &self,
-        py: Python<'_>,
-        name: &str,
-        ttl: i64,
-        value: &[u8],
-        replace: bool,
-        absttl: bool,
-        idletime: Option<u64>,
-        frequency: Option<u64>,
-    ) -> PyResult<bool> {
-        sync_op!(py, self, conn, async {
-            conn.restore(name, ttl, value, replace, absttl, idletime, frequency)
-                .await
-        })
-        .map_err(to_py_err)?;
-        Ok(true)
-    }
-
-    #[pyo3(signature = (
-        name,
-        ttl,
-        value,
-        *,
-        replace = false,
-        absttl = false,
-        idletime = None,
-        frequency = None,
-    ))]
-    #[allow(clippy::too_many_arguments)]
-    fn arestore(
         &self,
         py: Python<'_>,
         name: &str,

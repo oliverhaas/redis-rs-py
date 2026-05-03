@@ -8,7 +8,7 @@ wins the race owns the container; other workers wait on a sidecar file.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from filelock import FileLock
@@ -96,19 +96,79 @@ def valkey_url(
     yield _with_db(base_url, db)
 
 
-@pytest.fixture
-def driver(valkey_url: str):
-    from redis_rs_py._driver import RedisRsDriver
+class _DriverCompat:
+    """Thin compatibility shim that exposes both sync (Redis) and async
+    (AsyncRedis) APIs on a single object, preserving the old
+    ``RedisRsDriver`` call surface so existing tests need no changes.
 
-    drv = RedisRsDriver.connect_standard(valkey_url)
-    # FLUSHDB the per-worker DB so each test starts clean. (We call sync
-    # `flushdb` once it lands; for now use the upstream redis-py client.)
+    Sync method calls are forwarded to ``_sync``.
+    Calls with an ``a`` prefix (e.g. ``driver.aset(...)``) are forwarded
+    to the matching un-prefixed method on ``_async``.
+    """
+
+    def __init__(self, url: str) -> None:
+        from redis_rs_py import Redis
+        from redis_rs_py.asyncio import Redis as AsyncRedis
+
+        self._sync = Redis.from_url(url)
+        self._async = AsyncRedis.from_url(url)
+
+    # Expose sync attrs directly (connection_url, cache_statistics, etc.)
+    def __getattr__(self, name: str) -> Any:
+        # Route ``a``-prefixed names and ``await_`` to the async object.
+        #
+        # ``await_`` is the Python-keyword-safe alias for ``wait`` on the
+        # async Redis class. We check it before the general "a"-prefix
+        # stripping so it isn't mangled to "wait_".
+        if name == "await_":
+            return self._async.await_
+        # Names containing "async" (e.g. ``scan_iter_async``) are bound to
+        # the async object so that ``self.scan(...)`` inside them awaits
+        # properly — the sync Redis.scan_iter_async is the same function but
+        # bound to a sync object, causing a "tuple can't be awaited" error.
+        if "async" in name:
+            async_attr = getattr(self._async, name, None)
+            if async_attr is not None:
+                return async_attr
+        if name.startswith("a") and len(name) > 1 and not name.startswith("async"):
+            unprefixed = name[1:]
+            async_attr = getattr(self._async, unprefixed, None)
+            if async_attr is not None:
+                return async_attr
+        # Default: forward to sync object.
+        return getattr(self._sync, name)
+
+
+@pytest.fixture
+def driver(valkey_url: str) -> _DriverCompat:
+    compat = _DriverCompat(valkey_url)
+    # FLUSHDB the per-worker DB so each test starts clean.
     import redis
 
     rp = redis.Redis.from_url(valkey_url)
     rp.flushdb()
     rp.close()
-    return drv
+    return compat
+
+
+@pytest.fixture
+def redis_client(valkey_url: str):
+    """Sync Redis client fixture (new API name)."""
+    import redis
+    from redis_rs_py import Redis
+
+    rp = redis.Redis.from_url(valkey_url)
+    rp.flushdb()
+    rp.close()
+    return Redis.from_url(valkey_url)
+
+
+@pytest.fixture
+def async_redis_client(valkey_url: str):
+    """Async Redis client fixture."""
+    from redis_rs_py.asyncio import Redis as AsyncRedis
+
+    return AsyncRedis.from_url(valkey_url)
 
 
 @pytest.fixture

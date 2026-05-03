@@ -50,9 +50,9 @@ def test_set_with_ttl(driver) -> None:
     assert 0 < driver.ttl("key") <= 60
 
 
-def test_connect_standard_bad_url_raises_connection_error() -> None:
-    from redis_rs_py._driver import RedisRsDriver
+def test_connect_bad_url_raises_connection_error() -> None:
+    from redis_rs_py import Redis
     from redis_rs_py.exceptions import ConnectionError as RedisConnectionError
 
     with pytest.raises(RedisConnectionError):
-        RedisRsDriver.connect_standard("redis://127.0.0.1:1/0")
+        Redis.from_url("redis://127.0.0.1:1/0")

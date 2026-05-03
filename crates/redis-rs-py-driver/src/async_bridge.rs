@@ -92,6 +92,8 @@ pub enum RawResult {
     // Admin variants (Plan 09)
     /// `(seconds, microseconds)` string pair from TIME.
     OptStrPair(Option<(String, String)>),
+    /// `(seconds, microseconds)` integer pair from TIME.
+    IntPair(Option<(i64, i64)>),
     /// `list[dict[bytes, bytes]]` — used by CLIENT LIST.
     BytesPairsList(Vec<Vec<(Vec<u8>, Vec<u8>)>>),
 }
@@ -193,7 +195,7 @@ impl RawResult {
             }
             RawResult::OptKeyAndBytesList(None) => Ok(py.None()),
             RawResult::OptKeyAndBytes(Some((key, value))) => {
-                let py_key = PyString::new(py, &key).into_any().unbind();
+                let py_key = PyBytes::new(py, key.as_bytes()).into_any().unbind();
                 let py_value = PyBytes::new(py, &value).into_any().unbind();
                 Ok(PyTuple::new(py, [py_key, py_value])?.into_any().unbind())
             }
@@ -322,6 +324,12 @@ impl RawResult {
             RawResult::OptStrPair(Some((a, b))) => {
                 let a_py = PyString::new(py, &a).into_any().unbind();
                 let b_py = PyString::new(py, &b).into_any().unbind();
+                Ok(PyTuple::new(py, [a_py, b_py])?.into_any().unbind())
+            }
+            RawResult::IntPair(None) => Ok(py.None()),
+            RawResult::IntPair(Some((a, b))) => {
+                let a_py = a.into_pyobject(py)?.into_any().unbind();
+                let b_py = b.into_pyobject(py)?.into_any().unbind();
                 Ok(PyTuple::new(py, [a_py, b_py])?.into_any().unbind())
             }
             RawResult::BytesPairsList(rows) => {
