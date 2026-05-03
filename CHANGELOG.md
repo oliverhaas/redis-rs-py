@@ -24,3 +24,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Eight `_test_*` awaitable helpers exercising every code path of the bridge in isolation (resolved/none/int, delayed/callback-mode, pending, dropped, error, server-error).
 - Hand-maintained `python/redis_rs_py/_driver.pyi` type stubs covering the foundation surface.
 - `from redis_rs_py import RedisRsDriver, RedisRsAwaitable, __version__` top-level re-exports.
+- Driver list commands: `LPUSH`, `RPUSH`, `LPUSHX`, `RPUSHX`, `LPOP`/`RPOP` (with `count=`), `LRANGE`, `LLEN`, `LMOVE`, `LPOS` (with `rank=`/`count=`/`maxlen=`), `LREM`, `LINDEX`, `LSET`, `LINSERT`, `LTRIM`, `LMPOP`. Sync + async pair for every command.
+- Blocking list commands: `BLPOP`, `BRPOP`, `BLMOVE`, `BLMPOP`, routed through a lazily-allocated second `ConnectionManager` (no response timeout) so a long BLPOP never head-of-line-blocks the multiplexed pipeline.
