@@ -109,3 +109,19 @@ def driver(valkey_url: str):
     rp.flushdb()
     rp.close()
     return drv
+
+
+@pytest.fixture
+def redis_py_client(valkey_url: str):
+    """Upstream redis-py client against the same Valkey instance.
+
+    Used by parity tests in plans 08+ to compare reply shapes between
+    redis-rs-py and redis-py — for stream commands especially, the
+    bytes-vs-tuple-vs-dict shape contract is non-trivial and must
+    match exactly.
+    """
+    import redis  # noqa: PLC0415
+
+    rp = redis.Redis.from_url(valkey_url, decode_responses=False)
+    yield rp
+    rp.close()

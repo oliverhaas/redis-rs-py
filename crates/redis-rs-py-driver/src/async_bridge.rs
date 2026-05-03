@@ -67,6 +67,28 @@ pub enum RawResult {
     },
     Value(redis::Value),
     Error(crate::exceptions::ExceptionClass, String),
+    // Stream variants (Plan 08)
+    #[allow(clippy::type_complexity)]
+    StreamEntries(Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>),
+    #[allow(clippy::type_complexity)]
+    StreamReadEntries(Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>)>),
+    StreamPendingSummary(Option<(i64, Vec<u8>, Vec<u8>, Vec<(Vec<u8>, i64)>)>),
+    StreamPendingRange(Vec<(Vec<u8>, Vec<u8>, i64, i64)>),
+    #[allow(clippy::type_complexity)]
+    StreamClaim(Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>),
+    StreamClaimJustIds(Vec<Vec<u8>>),
+    #[allow(clippy::type_complexity)]
+    StreamAutoclaim(
+        (
+            Vec<u8>,
+            Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>,
+            Vec<Vec<u8>>,
+        ),
+    ),
+    StreamAutoclaimJustIds((Vec<u8>, Vec<Vec<u8>>, Vec<Vec<u8>>)),
+    StreamInfoStream(Vec<(Vec<u8>, redis::Value)>),
+    StreamInfoGroups(Vec<Vec<(Vec<u8>, redis::Value)>>),
+    StreamInfoConsumers(Vec<Vec<(Vec<u8>, redis::Value)>>),
 }
 
 fn redis_value_to_py(py: Python<'_>, v: redis::Value) -> PyResult<Py<PyAny>> {
@@ -293,8 +315,156 @@ impl RawResult {
             }
             RawResult::Value(v) => redis_value_to_py(py, v),
             RawResult::Error(class, e) => Err(class.into_py_err(py, e)),
+            // --- Stream variants (Plan 08) ---
+            RawResult::StreamEntries(entries) => {
+                let py_entries = build_stream_entries(py, entries)?;
+                Ok(py_entries.into_any().unbind())
+            }
+            RawResult::StreamReadEntries(streams) => {
+                if streams.is_empty() {
+                    return Ok(py.None());
+                }
+                let dict = PyDict::new(py);
+                for (key, entries) in streams {
+                    let key_py = PyBytes::new(py, &key).into_any().unbind();
+                    let entries_py = build_stream_entries(py, entries)?;
+                    dict.set_item(key_py, entries_py)?;
+                }
+                Ok(dict.into_any().unbind())
+            }
+            RawResult::StreamPendingSummary(None) => {
+                let zero = 0_i64.into_pyobject(py)?.into_any().unbind();
+                let none = py.None();
+                let empty_list = PyList::empty(py).into_any().unbind();
+                Ok(
+                    PyTuple::new(py, [zero, none.clone_ref(py), none, empty_list])?
+                        .into_any()
+                        .unbind(),
+                )
+            }
+            RawResult::StreamPendingSummary(Some((count, min_id, max_id, consumers))) => {
+                let count_py = count.into_pyobject(py)?.into_any().unbind();
+                let min_py = PyBytes::new(py, &min_id).into_any().unbind();
+                let max_py = PyBytes::new(py, &max_id).into_any().unbind();
+                let consumers_py: Vec<Py<PyAny>> = consumers
+                    .into_iter()
+                    .map(|(name, n)| {
+                        let name_py = PyBytes::new(py, &name).into_any().unbind();
+                        let n_py = n.into_pyobject(py)?.into_any().unbind();
+                        PyTuple::new(py, [name_py, n_py]).map(|t| t.into_any().unbind())
+                    })
+                    .collect::<PyResult<_>>()?;
+                let consumers_list = PyList::new(py, consumers_py)?.into_any().unbind();
+                Ok(
+                    PyTuple::new(py, [count_py, min_py, max_py, consumers_list])?
+                        .into_any()
+                        .unbind(),
+                )
+            }
+            RawResult::StreamPendingRange(rows) => {
+                let items: Vec<Py<PyAny>> = rows
+                    .into_iter()
+                    .map(|(id, consumer, idle, deliveries)| {
+                        let d = PyDict::new(py);
+                        d.set_item(b"message_id" as &[u8], PyBytes::new(py, &id))?;
+                        d.set_item(b"consumer" as &[u8], PyBytes::new(py, &consumer))?;
+                        d.set_item(b"time_since_delivered" as &[u8], idle)?;
+                        d.set_item(b"times_delivered" as &[u8], deliveries)?;
+                        Ok::<_, PyErr>(d.into_any().unbind())
+                    })
+                    .collect::<PyResult<_>>()?;
+                Ok(PyList::new(py, items)?.into_any().unbind())
+            }
+            RawResult::StreamClaim(entries) => {
+                Ok(build_stream_entries(py, entries)?.into_any().unbind())
+            }
+            RawResult::StreamClaimJustIds(ids) => {
+                let items: Vec<Py<PyAny>> = ids
+                    .into_iter()
+                    .map(|id| PyBytes::new(py, &id).into_any().unbind())
+                    .collect();
+                Ok(PyList::new(py, items)?.into_any().unbind())
+            }
+            RawResult::StreamAutoclaim((next_id, entries, deleted)) => {
+                let next_id_py = PyBytes::new(py, &next_id).into_any().unbind();
+                let entries_py = build_stream_entries(py, entries)?.into_any().unbind();
+                let deleted_py: Vec<Py<PyAny>> = deleted
+                    .into_iter()
+                    .map(|id| PyBytes::new(py, &id).into_any().unbind())
+                    .collect();
+                let deleted_list = PyList::new(py, deleted_py)?.into_any().unbind();
+                Ok(PyTuple::new(py, [next_id_py, entries_py, deleted_list])?
+                    .into_any()
+                    .unbind())
+            }
+            RawResult::StreamAutoclaimJustIds((next_id, ids, deleted)) => {
+                let next_id_py = PyBytes::new(py, &next_id).into_any().unbind();
+                let ids_py: Vec<Py<PyAny>> = ids
+                    .into_iter()
+                    .map(|id| PyBytes::new(py, &id).into_any().unbind())
+                    .collect();
+                let ids_list = PyList::new(py, ids_py)?.into_any().unbind();
+                let deleted_py: Vec<Py<PyAny>> = deleted
+                    .into_iter()
+                    .map(|id| PyBytes::new(py, &id).into_any().unbind())
+                    .collect();
+                let deleted_list = PyList::new(py, deleted_py)?.into_any().unbind();
+                Ok(PyTuple::new(py, [next_id_py, ids_list, deleted_list])?
+                    .into_any()
+                    .unbind())
+            }
+            RawResult::StreamInfoStream(pairs) => {
+                let dict = PyDict::new(py);
+                for (k, v) in pairs {
+                    let v_py = redis_value_to_py(py, v)?;
+                    dict.set_item(PyBytes::new(py, &k), v_py)?;
+                }
+                Ok(dict.into_any().unbind())
+            }
+            RawResult::StreamInfoGroups(rows) => {
+                let mut items: Vec<Py<PyAny>> = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let d = PyDict::new(py);
+                    for (k, v) in row {
+                        let v_py = redis_value_to_py(py, v)?;
+                        d.set_item(PyBytes::new(py, &k), v_py)?;
+                    }
+                    items.push(d.into_any().unbind());
+                }
+                Ok(PyList::new(py, items)?.into_any().unbind())
+            }
+            RawResult::StreamInfoConsumers(rows) => {
+                let mut items: Vec<Py<PyAny>> = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let d = PyDict::new(py);
+                    for (k, v) in row {
+                        let v_py = redis_value_to_py(py, v)?;
+                        d.set_item(PyBytes::new(py, &k), v_py)?;
+                    }
+                    items.push(d.into_any().unbind());
+                }
+                Ok(PyList::new(py, items)?.into_any().unbind())
+            }
         }
     }
+}
+
+#[allow(clippy::type_complexity)]
+fn build_stream_entries(
+    py: Python<'_>,
+    entries: Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>,
+) -> PyResult<Bound<'_, PyList>> {
+    let mut items: Vec<Py<PyAny>> = Vec::with_capacity(entries.len());
+    for (id, fields) in entries {
+        let id_py = PyBytes::new(py, &id).into_any().unbind();
+        let dict = PyDict::new(py);
+        for (k, v) in fields {
+            dict.set_item(PyBytes::new(py, &k), PyBytes::new(py, &v))?;
+        }
+        let tuple = PyTuple::new(py, [id_py, dict.into_any().unbind()])?;
+        items.push(tuple.into_any().unbind());
+    }
+    PyList::new(py, items)
 }
 
 // =========================================================================

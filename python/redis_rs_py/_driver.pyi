@@ -905,6 +905,232 @@ class RedisRsDriver:
     def zintercard(self, *, keys: list[str], limit: int | None = ...) -> int: ...
     def azintercard(self, *, keys: list[str], limit: int | None = ...) -> Awaitable[int]: ...
 
+    # --- Streams (Plan 08) ---------------------------------------------
+    def xadd(
+        self,
+        key: str,
+        id: str,
+        fields: list[tuple[str, bytes]],
+        *,
+        nomkstream: bool = ...,
+        maxlen: int | None = ...,
+        minid: str | None = ...,
+        approximate: bool = ...,
+        limit: int | None = ...,
+    ) -> str | None: ...
+    def axadd(
+        self,
+        key: str,
+        id: str,
+        fields: list[tuple[str, bytes]],
+        *,
+        nomkstream: bool = ...,
+        maxlen: int | None = ...,
+        minid: str | None = ...,
+        approximate: bool = ...,
+        limit: int | None = ...,
+    ) -> Awaitable[str | None]: ...
+    def xlen(self, key: str) -> int: ...
+    def axlen(self, key: str) -> Awaitable[int]: ...
+    def xdel(self, key: str, *ids: str) -> int: ...
+    def axdel(self, key: str, *ids: str) -> Awaitable[int]: ...
+    def xack(self, key: str, group: str, *ids: str) -> int: ...
+    def axack(self, key: str, group: str, *ids: str) -> Awaitable[int]: ...
+    def xrange(
+        self, key: str, min: str, max: str, *, count: int | None = ...
+    ) -> list[tuple[bytes, dict[bytes, bytes]]]: ...
+    def axrange(
+        self, key: str, min: str, max: str, *, count: int | None = ...
+    ) -> Awaitable[list[tuple[bytes, dict[bytes, bytes]]]]: ...
+    def xrevrange(
+        self, key: str, max: str, min: str, *, count: int | None = ...
+    ) -> list[tuple[bytes, dict[bytes, bytes]]]: ...
+    def axrevrange(
+        self, key: str, max: str, min: str, *, count: int | None = ...
+    ) -> Awaitable[list[tuple[bytes, dict[bytes, bytes]]]]: ...
+    def xread(
+        self,
+        streams: dict[str, str],
+        *,
+        count: int | None = ...,
+        block: int | None = ...,
+    ) -> dict[bytes, list[tuple[bytes, dict[bytes, bytes]]]] | None: ...
+    def axread(
+        self,
+        streams: dict[str, str],
+        *,
+        count: int | None = ...,
+        block: int | None = ...,
+    ) -> Awaitable[dict[bytes, list[tuple[bytes, dict[bytes, bytes]]]] | None]: ...
+    def xreadgroup(
+        self,
+        group: str,
+        consumer: str,
+        streams: dict[str, str],
+        *,
+        count: int | None = ...,
+        block: int | None = ...,
+        noack: bool = ...,
+    ) -> dict[bytes, list[tuple[bytes, dict[bytes, bytes]]]] | None: ...
+    def axreadgroup(
+        self,
+        group: str,
+        consumer: str,
+        streams: dict[str, str],
+        *,
+        count: int | None = ...,
+        block: int | None = ...,
+        noack: bool = ...,
+    ) -> Awaitable[dict[bytes, list[tuple[bytes, dict[bytes, bytes]]]] | None]: ...
+    def xgroup_create(
+        self,
+        key: str,
+        group: str,
+        *,
+        id: str = ...,
+        mkstream: bool = ...,
+        entries_read: int | None = ...,
+    ) -> None: ...
+    def axgroup_create(
+        self,
+        key: str,
+        group: str,
+        *,
+        id: str = ...,
+        mkstream: bool = ...,
+        entries_read: int | None = ...,
+    ) -> Awaitable[None]: ...
+    def xgroup_setid(self, key: str, group: str, *, id: str, entries_read: int | None = ...) -> None: ...
+    def axgroup_setid(self, key: str, group: str, *, id: str, entries_read: int | None = ...) -> Awaitable[None]: ...
+    def xgroup_destroy(self, key: str, group: str) -> int: ...
+    def axgroup_destroy(self, key: str, group: str) -> Awaitable[int]: ...
+    def xgroup_createconsumer(self, key: str, group: str, consumer: str) -> int: ...
+    def axgroup_createconsumer(self, key: str, group: str, consumer: str) -> Awaitable[int]: ...
+    def xgroup_delconsumer(self, key: str, group: str, consumer: str) -> int: ...
+    def axgroup_delconsumer(self, key: str, group: str, consumer: str) -> Awaitable[int]: ...
+    def xinfo_stream(self, key: str, *, full: bool = ...) -> dict[bytes, Any]: ...
+    def axinfo_stream(self, key: str, *, full: bool = ...) -> Awaitable[dict[bytes, Any]]: ...
+    def xinfo_groups(self, key: str) -> list[dict[bytes, Any]]: ...
+    def axinfo_groups(self, key: str) -> Awaitable[list[dict[bytes, Any]]]: ...
+    def xinfo_consumers(self, key: str, group: str) -> list[dict[bytes, Any]]: ...
+    def axinfo_consumers(self, key: str, group: str) -> Awaitable[list[dict[bytes, Any]]]: ...
+    def xtrim(
+        self,
+        key: str,
+        *,
+        maxlen: int | None = ...,
+        minid: str | None = ...,
+        approximate: bool = ...,
+        limit: int | None = ...,
+    ) -> int: ...
+    def axtrim(
+        self,
+        key: str,
+        *,
+        maxlen: int | None = ...,
+        minid: str | None = ...,
+        approximate: bool = ...,
+        limit: int | None = ...,
+    ) -> Awaitable[int]: ...
+    def xpending(
+        self,
+        key: str,
+        group: str,
+        *,
+        idle: int | None = ...,
+        min: str | None = ...,
+        max: str | None = ...,
+        count: int | None = ...,
+        consumer: str | None = ...,
+    ) -> tuple[int, bytes | None, bytes | None, list[tuple[bytes, int]]] | list[dict[bytes, Any]]: ...
+    def axpending(
+        self,
+        key: str,
+        group: str,
+        *,
+        idle: int | None = ...,
+        min: str | None = ...,
+        max: str | None = ...,
+        count: int | None = ...,
+        consumer: str | None = ...,
+    ) -> Awaitable[tuple[int, bytes | None, bytes | None, list[tuple[bytes, int]]] | list[dict[bytes, Any]]]: ...
+    def xclaim(
+        self,
+        key: str,
+        group: str,
+        consumer: str,
+        *,
+        min_idle_time: int,
+        message_ids: list[str],
+        idle: int | None = ...,
+        time: int | None = ...,
+        retrycount: int | None = ...,
+        force: bool = ...,
+        justid: bool = ...,
+    ) -> list[tuple[bytes, dict[bytes, bytes]]] | list[bytes]: ...
+    def axclaim(
+        self,
+        key: str,
+        group: str,
+        consumer: str,
+        *,
+        min_idle_time: int,
+        message_ids: list[str],
+        idle: int | None = ...,
+        time: int | None = ...,
+        retrycount: int | None = ...,
+        force: bool = ...,
+        justid: bool = ...,
+    ) -> Awaitable[list[tuple[bytes, dict[bytes, bytes]]] | list[bytes]]: ...
+    def xautoclaim(
+        self,
+        key: str,
+        group: str,
+        consumer: str,
+        *,
+        min_idle_time: int,
+        start_id: str = ...,
+        count: int = ...,
+        justid: bool = ...,
+    ) -> tuple[
+        bytes,
+        list[tuple[bytes, dict[bytes, bytes]]] | list[bytes],
+        list[bytes],
+    ]: ...
+    def axautoclaim(
+        self,
+        key: str,
+        group: str,
+        consumer: str,
+        *,
+        min_idle_time: int,
+        start_id: str = ...,
+        count: int = ...,
+        justid: bool = ...,
+    ) -> Awaitable[
+        tuple[
+            bytes,
+            list[tuple[bytes, dict[bytes, bytes]]] | list[bytes],
+            list[bytes],
+        ]
+    ]: ...
+    def xsetid(
+        self,
+        key: str,
+        id: str,
+        *,
+        entries_added: int | None = ...,
+        max_deleted_entry_id: str | None = ...,
+    ) -> None: ...
+    def axsetid(
+        self,
+        key: str,
+        id: str,
+        *,
+        entries_added: int | None = ...,
+        max_deleted_entry_id: str | None = ...,
+    ) -> Awaitable[None]: ...
+
     # --- Test-only -----------------------------------------------------
     def _blocking_initialised(self) -> bool: ...
 

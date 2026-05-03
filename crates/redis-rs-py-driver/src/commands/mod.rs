@@ -9,5 +9,6 @@
 pub mod hashes;
 pub mod lists;
 pub mod sets;
+pub mod streams;
 pub mod strings;
 pub mod zsets;

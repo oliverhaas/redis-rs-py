@@ -158,3 +158,28 @@ impl From<Vec<bool>> for RawResult {
         RawResult::BoolList(v)
     }
 }
+
+// Stream From<T> impls (Plan 08)
+impl From<Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>> for RawResult {
+    fn from(v: Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>) -> Self {
+        RawResult::StreamEntries(v)
+    }
+}
+
+impl From<Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>)>> for RawResult {
+    fn from(v: Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>)>) -> Self {
+        RawResult::StreamReadEntries(v)
+    }
+}
+
+impl From<Option<(i64, Vec<u8>, Vec<u8>, Vec<(Vec<u8>, i64)>)>> for RawResult {
+    fn from(v: Option<(i64, Vec<u8>, Vec<u8>, Vec<(Vec<u8>, i64)>)>) -> Self {
+        RawResult::StreamPendingSummary(v)
+    }
+}
+
+impl From<Vec<(Vec<u8>, Vec<u8>, i64, i64)>> for RawResult {
+    fn from(v: Vec<(Vec<u8>, Vec<u8>, i64, i64)>) -> Self {
+        RawResult::StreamPendingRange(v)
+    }
+}
