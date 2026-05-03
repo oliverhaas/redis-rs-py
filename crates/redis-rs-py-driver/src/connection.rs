@@ -618,6 +618,181 @@ impl ValkeyConnInner {
     }
 }
 
+// =========================================================================
+// Pipeline support (Plan 13)
+// =========================================================================
+
+use redis::aio::MultiplexedConnection;
+
+/// An exclusive, single-owner connection reserved for the lifetime of a
+/// pipeline that uses WATCH. Allocates a fresh `MultiplexedConnection`
+/// because redis-rs's `ConnectionManager` does not support check-out from
+/// the regular pool.
+pub struct ReservedConnection {
+    inner: MultiplexedConnection,
+    watched: bool,
+}
+
+impl ReservedConnection {
+    pub fn new(inner: MultiplexedConnection) -> Self {
+        Self {
+            inner,
+            watched: false,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_watched(&mut self) {
+        self.watched = true;
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_watched(&mut self) {
+        self.watched = false;
+    }
+
+    #[allow(dead_code)]
+    pub fn is_watched(&self) -> bool {
+        self.watched
+    }
+
+    pub async fn unwatch_if_needed(&mut self) -> RedisResult<()> {
+        if self.watched {
+            let cmd = redis::cmd("UNWATCH");
+            let _: redis::Value = cmd.query_async(&mut self.inner).await?;
+            self.watched = false;
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn conn_mut(&mut self) -> &mut MultiplexedConnection {
+        &mut self.inner
+    }
+
+    /// Send WATCH on the reserved connection.
+    pub async fn watch(&mut self, keys: &[String]) -> RedisResult<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let mut cmd = redis::cmd("WATCH");
+        for k in keys {
+            cmd.arg(k.as_str());
+        }
+        let _: redis::Value = cmd.query_async(&mut self.inner).await?;
+        self.watched = true;
+        Ok(())
+    }
+
+    /// Send a single command immediately on the reserved connection.
+    pub async fn dispatch_immediate(
+        &mut self,
+        cmd_name: &str,
+        args: &[Vec<u8>],
+    ) -> RedisResult<redis::Value> {
+        let mut cmd = redis::cmd(cmd_name);
+        for a in args {
+            cmd.arg(a.as_slice());
+        }
+        cmd.query_async(&mut self.inner).await
+    }
+
+    /// Execute a transactional block on this reserved connection.
+    /// Sends MULTI, each command in `transaction_block`, then EXEC.
+    /// WATCH is assumed already sent (via `watch()`).
+    /// Returns `WatchedExecResult::WatchAborted` if EXEC replied Nil.
+    pub async fn pipeline_exec_watched(
+        &mut self,
+        watched_keys: &[String],
+        transaction_block: Vec<(String, Vec<Vec<u8>>)>,
+    ) -> RedisResult<WatchedExecResult> {
+        // Send WATCH if not already issued.
+        if !watched_keys.is_empty() && !self.watched {
+            let mut cmd = redis::cmd("WATCH");
+            for k in watched_keys {
+                cmd.arg(k.as_str());
+            }
+            let _: redis::Value = cmd.query_async(&mut self.inner).await?;
+            self.watched = true;
+        }
+
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        for (cmd_name, args) in &transaction_block {
+            let mut cmd = redis::cmd(cmd_name);
+            for a in args {
+                cmd.arg(a.as_slice());
+            }
+            pipe.add_command(cmd);
+        }
+
+        let raw: redis::Value = pipe.query_async(&mut self.inner).await?;
+
+        // EXEC clears WATCH server-side.
+        self.watched = false;
+
+        match raw {
+            redis::Value::Nil => Ok(WatchedExecResult::WatchAborted),
+            redis::Value::Array(items) => Ok(WatchedExecResult::Ok(items)),
+            other => Err(redis::RedisError::from((
+                redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
+                "EXEC returned unexpected value",
+                format!("{other:?}"),
+            ))),
+        }
+    }
+}
+
+/// Result of a watched pipeline execution.
+pub enum WatchedExecResult {
+    Ok(Vec<redis::Value>),
+    WatchAborted,
+}
+
+impl ValkeyConn {
+    /// Reserve an exclusive connection for a WATCH-mode pipeline.
+    /// Allocates a fresh `MultiplexedConnection` — one per active WATCH pipeline.
+    pub async fn reserve_connection(&self) -> Result<ReservedConnection, String> {
+        match &self.config {
+            ConnConfig::Standard { url, tls_opts } => {
+                let client = create_client(url, tls_opts.as_ref()).map_err(|e| e.to_string())?;
+                let conn = client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(ReservedConnection::new(conn))
+            }
+        }
+    }
+}
+
+impl ValkeyConnInner {
+    /// Execute a pipeline of arbitrary commands. When `transaction` is true,
+    /// wraps the batch in MULTI/EXEC for atomicity.
+    pub async fn pipeline_exec(
+        &mut self,
+        commands: Vec<(String, Vec<Vec<u8>>)>,
+        transaction: bool,
+    ) -> RedisResult<Vec<redis::Value>> {
+        match self {
+            Self::Standard(c) => {
+                let mut pipe = redis::pipe();
+                if transaction {
+                    pipe.atomic();
+                }
+                for (cmd_name, args) in &commands {
+                    let mut cmd = redis::cmd(cmd_name);
+                    for a in args {
+                        cmd.arg(a.as_slice());
+                    }
+                    pipe.add_command(cmd);
+                }
+                pipe.query_async(c).await
+            }
+        }
+    }
+}
+
 fn append_expire_flag(cmd: &mut redis::Cmd, nx: bool, xx: bool, gt: bool, lt: bool) {
     if nx {
         cmd.arg("NX");

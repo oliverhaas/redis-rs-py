@@ -221,11 +221,17 @@ impl Redis {
     }
 
     #[pyo3(signature = (transaction = true, shard_hint = None))]
-    fn pipeline(&self, transaction: bool, shard_hint: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-        let _ = (transaction, shard_hint);
-        Err(PyNotImplementedError::new_err(
-            "Pipeline is implemented by plan 13 (pipelines-transactions).",
-        ))
+    fn pipeline(
+        &self,
+        py: Python<'_>,
+        transaction: bool,
+        shard_hint: Option<Py<PyAny>>,
+    ) -> PyResult<Py<crate::facade::pipeline::Pipeline>> {
+        let _ = shard_hint;
+        Py::new(
+            py,
+            crate::facade::pipeline::Pipeline::new(self.connection.clone(), transaction),
+        )
     }
 
     #[pyo3(signature = (**kwargs))]
@@ -236,19 +242,28 @@ impl Redis {
         ))
     }
 
-    #[pyo3(signature = (func, *watches, value_from_callable = false, watch_delay = None, **kwargs))]
+    #[pyo3(signature = (func, *watches, value_from_callable = false, watch_delay = None, **_kwargs))]
     fn transaction(
         &self,
+        py: Python<'_>,
         func: Py<PyAny>,
         watches: &Bound<'_, PyTuple>,
         value_from_callable: bool,
         watch_delay: Option<f64>,
-        kwargs: Option<Bound<'_, PyDict>>,
+        _kwargs: Option<Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = (func, watches, value_from_callable, watch_delay, kwargs);
-        Err(PyNotImplementedError::new_err(
-            "transaction() is implemented by plan 13.",
-        ))
+        let watch_keys: Vec<String> = watches
+            .iter()
+            .map(|k| k.extract::<String>())
+            .collect::<PyResult<_>>()?;
+        crate::facade::pipeline::transaction_helper(
+            py,
+            self.connection.clone(),
+            func,
+            watch_keys,
+            value_from_callable,
+            watch_delay,
+        )
     }
 
     #[getter]

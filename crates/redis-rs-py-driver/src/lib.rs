@@ -26,6 +26,8 @@ fn _driver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<async_bridge::RedisRsAwaitable>()?;
     m.add_class::<facade::sync::Redis>()?;
     m.add_class::<facade::sync::Lock>()?;
+    m.add_class::<facade::pipeline::Pipeline>()?;
+    m.add_class::<facade::pipeline::AsyncPipeline>()?;
 
     m.add_function(wrap_pyfunction!(test_helpers::_test_resolved_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(test_helpers::_test_resolved_none, m)?)?;

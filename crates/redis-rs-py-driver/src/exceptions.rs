@@ -102,6 +102,7 @@ pub enum ExceptionClass {
     MovedError,
     AskError,
     TryAgainError,
+    WatchError,
 }
 
 impl ExceptionClass {
@@ -127,6 +128,7 @@ impl ExceptionClass {
             ExceptionClass::MovedError => PyErr::new::<MovedError, _>(msg),
             ExceptionClass::AskError => PyErr::new::<AskError, _>(msg),
             ExceptionClass::TryAgainError => PyErr::new::<TryAgainError, _>(msg),
+            ExceptionClass::WatchError => PyErr::new::<WatchError, _>(msg),
         }
     }
 }

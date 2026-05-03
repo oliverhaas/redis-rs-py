@@ -50,12 +50,13 @@ def test_double_close_is_safe(valkey_url: str):
     r.close()  # should be silent
 
 
-def test_pipeline_stub_raises_not_implemented(valkey_url: str):
-    """pipeline() raises NotImplementedError (not yet implemented)."""
-    from redis_rs_py import Redis
+def test_pipeline_returns_pipeline(valkey_url: str):
+    """pipeline() returns a Pipeline object (implemented in Plan 13)."""
+    from redis_rs_py import Pipeline, Redis
 
-    with Redis.from_url(valkey_url) as r, pytest.raises(NotImplementedError):
-        r.pipeline()
+    with Redis.from_url(valkey_url) as r:
+        pipe = r.pipeline()
+        assert isinstance(pipe, Pipeline)
 
 
 def test_pubsub_stub_raises_not_implemented(valkey_url: str):
@@ -66,9 +67,19 @@ def test_pubsub_stub_raises_not_implemented(valkey_url: str):
         r.pubsub()
 
 
-def test_transaction_stub_raises_not_implemented(valkey_url: str):
-    """transaction() raises NotImplementedError (not yet implemented)."""
+def test_transaction_runs_callable(valkey_url: str):
+    """transaction() runs the callable and returns the result (Plan 13)."""
     from redis_rs_py import Redis
 
-    with Redis.from_url(valkey_url) as r, pytest.raises(NotImplementedError):
-        r.transaction(lambda pipe: None)
+    with Redis.from_url(valkey_url) as r:
+        r.set("tc_key", b"0")
+        called: list[bool] = []
+
+        def func(pipe) -> None:
+            called.append(True)
+            pipe.multi()
+            pipe.set("tc_key", b"1")
+
+        result = r.transaction(func, "tc_key")
+        assert called == [True]
+        assert result == [True]
