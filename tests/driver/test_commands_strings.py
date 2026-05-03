@@ -557,7 +557,7 @@ def test_copy_missing_source_returns_false(driver) -> None:
 
 
 def test_copy_with_db_to_other_db(driver) -> None:
-    import uuid  # noqa: PLC0415
+    import uuid
 
     driver.set("a", b"v")
     # COPY can target a different db. We use DB 15 as the cross-db target.

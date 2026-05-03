@@ -15,7 +15,7 @@ def test_wrongtype_raises_response_error(driver, valkey_url: str) -> None:
     # LPUSH on a string key → WRONGTYPE. Sanity check via upstream client.
     # Use valkey_url (not driver.connection_url) — redis-py rejects the
     # `protocol=resp3` query parameter.
-    import redis  # noqa: PLC0415
+    import redis
 
     rp = redis.Redis.from_url(valkey_url)
     with pytest.raises(redis.exceptions.ResponseError):  # sanity check upstream
@@ -58,7 +58,7 @@ def test_auth_failure_raises_authentication_error(valkey_url: str) -> None:
 
 
 def test_connect_to_dead_port_raises_connection_error() -> None:
-    from redis_rs_py._driver import RedisRsDriver  # noqa: PLC0415
+    from redis_rs_py._driver import RedisRsDriver
 
     with pytest.raises(RedisConnectionError):
         RedisRsDriver.connect_standard("redis://127.0.0.1:1/0")

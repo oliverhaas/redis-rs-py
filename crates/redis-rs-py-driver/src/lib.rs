@@ -12,6 +12,7 @@ mod connection;
 mod driver;
 mod errors;
 pub(crate) mod exceptions;
+mod facade;
 mod raw_result;
 mod runtime;
 mod test_helpers;
@@ -24,6 +25,8 @@ fn _driver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     exceptions::register(m.py(), m)?;
     m.add_class::<async_bridge::RedisRsAwaitable>()?;
     m.add_class::<driver::RedisRsDriver>()?;
+    m.add_class::<facade::sync::Redis>()?;
+    m.add_class::<facade::sync::Lock>()?;
 
     m.add_function(wrap_pyfunction!(test_helpers::_test_resolved_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(test_helpers::_test_resolved_none, m)?)?;
@@ -33,6 +36,7 @@ fn _driver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(test_helpers::_test_dropped, m)?)?;
     m.add_function(wrap_pyfunction!(test_helpers::_test_error, m)?)?;
     m.add_function(wrap_pyfunction!(test_helpers::_test_server_error, m)?)?;
+    m.add_function(wrap_pyfunction!(facade::kwargs::py_reset_warn_state, m)?)?;
 
     Ok(())
 }

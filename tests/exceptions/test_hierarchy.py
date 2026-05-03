@@ -35,7 +35,7 @@ EXPECTED_EXCEPTIONS = {
 
 @pytest.mark.parametrize("name,bases", list(EXPECTED_EXCEPTIONS.items()))
 def test_exception_class_exists_with_bases(name: str, bases: tuple[str, ...]) -> None:
-    from redis_rs_py.exceptions import __dict__ as exc_dict  # noqa: PLC0415
+    from redis_rs_py.exceptions import __dict__ as exc_dict
 
     assert name in exc_dict, f"{name} missing"
     cls = exc_dict[name]
@@ -48,7 +48,7 @@ def test_exception_class_exists_with_bases(name: str, bases: tuple[str, ...]) ->
 
 
 def test_redis_error_is_root() -> None:
-    from redis_rs_py.exceptions import RedisError  # noqa: PLC0415
+    from redis_rs_py.exceptions import RedisError
 
     assert issubclass(RedisError, Exception)
 
@@ -57,9 +57,9 @@ def test_python_builtin_connection_error_is_unrelated() -> None:
     """redis.exceptions.ConnectionError is *NOT* the Python builtin one
     (despite the name collision). We mirror that — our ConnectionError is
     a RedisError subclass, not the stdlib one."""
-    import builtins  # noqa: PLC0415
+    import builtins
 
-    from redis_rs_py.exceptions import ConnectionError as RedisConnectionError  # noqa: PLC0415
+    from redis_rs_py.exceptions import ConnectionError as RedisConnectionError
 
     assert RedisConnectionError is not builtins.ConnectionError
     assert not issubclass(RedisConnectionError, builtins.ConnectionError)

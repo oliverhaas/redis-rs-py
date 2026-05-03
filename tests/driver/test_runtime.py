@@ -36,7 +36,7 @@ def test_runtime_survives_fork() -> None:
         try:
             result = asyncio.run(_go())
             os._exit(0 if result == 7 else 1)
-        except Exception:  # noqa: BLE001
+        except Exception:
             os._exit(2)
     else:
         _, status = os.waitpid(pid, 0)

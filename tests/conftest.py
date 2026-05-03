@@ -98,12 +98,12 @@ def valkey_url(
 
 @pytest.fixture
 def driver(valkey_url: str):
-    from redis_rs_py._driver import RedisRsDriver  # noqa: PLC0415
+    from redis_rs_py._driver import RedisRsDriver
 
     drv = RedisRsDriver.connect_standard(valkey_url)
     # FLUSHDB the per-worker DB so each test starts clean. (We call sync
     # `flushdb` once it lands; for now use the upstream redis-py client.)
-    import redis  # noqa: PLC0415
+    import redis
 
     rp = redis.Redis.from_url(valkey_url)
     rp.flushdb()
@@ -120,7 +120,7 @@ def redis_py_client(valkey_url: str):
     bytes-vs-tuple-vs-dict shape contract is non-trivial and must
     match exactly.
     """
-    import redis  # noqa: PLC0415
+    import redis
 
     rp = redis.Redis.from_url(valkey_url, decode_responses=False)
     yield rp

@@ -497,7 +497,7 @@ class TestBgsaveBgrewriteaof:
         # ERR Background save already in progress on rare occasions.
         try:
             result = driver.bgsave()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pytest.skip("BGSAVE clashed with concurrent test")
         else:
             assert isinstance(result, bytes)
@@ -506,14 +506,14 @@ class TestBgsaveBgrewriteaof:
         try:
             result = driver.bgsave(schedule=True)
             assert isinstance(result, bytes)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pytest.skip("BGSAVE clashed with concurrent test")
 
     def test_bgrewriteaof_returns_message(self, driver) -> None:
         try:
             result = driver.bgrewriteaof()
             assert isinstance(result, bytes)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pytest.skip("BGREWRITEAOF clashed with concurrent test")
 
 
@@ -522,7 +522,7 @@ class TestDebugSleep:
         start = time.monotonic()
         try:
             driver.debug_sleep(0.2)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pytest.skip("DEBUG SLEEP not enabled on this server")
         elapsed = time.monotonic() - start
         assert elapsed >= 0.2
@@ -532,7 +532,7 @@ class TestDebugSleep:
         start = time.monotonic()
         try:
             await driver.adebug_sleep(0.1)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pytest.skip("DEBUG SLEEP not enabled on this server")
         elapsed = time.monotonic() - start
         assert elapsed >= 0.1
