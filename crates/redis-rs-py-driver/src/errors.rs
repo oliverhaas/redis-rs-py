@@ -2,11 +2,18 @@
 //
 // Logic, in order of preference:
 //   1. Connection-class kinds (Io, dropped, refused, timeout) → ConnectionError or TimeoutError.
-//   2. ServerErrorKind → its dedicated Exception class.
-//   3. Code-prefix sniffing on the message (NOSCRIPT, OOM, MOVED, ASK, etc.).
-//   4. Fallback: ResponseError.
+//   2. ServerErrorKind discriminants (BusyLoading, NoScript, ReadOnly, Moved, Ask, etc.).
+//   3. Code-based sniffing for Extension server errors that redis-rs hasn't pulled into
+//      ServerErrorKind yet (OOM, WRONGPASS, NOAUTH, MODULE, WRONGTYPE, etc.). Real server
+//      replies arrive as `ErrorKind::Extension` carrying the raw code; the Display string
+//      Debug-quotes the code (`"WRONGTYPE": ...`) so prefix-sniffing on `to_string()` is
+//      unreliable. Use `e.code()` instead, which returns the unquoted code.
+//   4. Generic ResponseError fallback for any remaining server-side error
+//      (kind = Parse / Server(ResponseError) / Extension without a recognised code).
+//   5. Final fallback: RedisError (base catch-all).
 
 use pyo3::PyErr;
+use pyo3::Python;
 
 use crate::async_bridge::RawResult;
 use crate::exceptions::ExceptionClass;
@@ -41,30 +48,36 @@ pub fn classify_error(e: &redis::RedisError) -> ExceptionClass {
         }
     }
 
-    // Layer 3: prefix sniffing on the textual message (covers servers /
-    // codes redis-rs hasn't yet pulled into ServerErrorKind).
-    let msg = e.to_string();
-    let msg_upper = msg.to_ascii_uppercase();
-    if msg_upper.starts_with("OOM") {
-        return ExceptionClass::OutOfMemoryError;
+    // Layer 3: code-based sniffing for Extension server errors. The `code()` accessor
+    // returns the raw code without the Debug-format quotes that `Display` adds, so it
+    // works for both ErrorRepr::Server(Extension) (real wire errors) and ErrorRepr::General
+    // (the test/synthetic constructor path).
+    if let Some(code) = e.code() {
+        let code_upper = code.to_ascii_uppercase();
+        if code_upper == "OOM" {
+            return ExceptionClass::OutOfMemoryError;
+        }
+        if code_upper == "WRONGPASS" || code_upper == "NOAUTH" {
+            return ExceptionClass::AuthenticationError;
+        }
+        if code_upper.starts_with("MODULE") {
+            return ExceptionClass::ModuleError;
+        }
     }
-    if msg_upper.starts_with("WRONGPASS")
-        || msg_upper.starts_with("NOAUTH")
-        || msg_upper.contains("AUTHENTICATION")
-    {
-        return ExceptionClass::AuthenticationError;
-    }
-    if msg_upper.starts_with("MODULE") {
-        return ExceptionClass::ModuleError;
-    }
+
+    // Layer 4: any remaining server-side error → ResponseError. `Extension` covers the
+    // catch-all "unknown server reply" path; without it WRONGTYPE etc. would fall through
+    // to the base RedisError fallback below.
     if matches!(
         e.kind(),
-        redis::ErrorKind::Parse | redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError)
+        redis::ErrorKind::Parse
+            | redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError)
+            | redis::ErrorKind::Extension
     ) {
         return ExceptionClass::ResponseError;
     }
 
-    // Layer 4: fallback
+    // Layer 5: final fallback
     ExceptionClass::RedisError
 }
 
@@ -81,8 +94,6 @@ pub fn classify(e: redis::RedisError) -> RawResult {
     RawResult::Error(class, e.to_string())
 }
 
-use pyo3::Python;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,10 +103,16 @@ mod tests {
         code: &'static str,
         msg: &'static str,
     ) -> redis::RedisError {
-        // RedisError::from((kind, detail, source)) — the test-helper form
-        // is RedisError::from((kind, code, msg)) which serialises as
-        // `<code>: <msg>`.
+        // RedisError::from((kind, code, msg)) — produces ErrorRepr::General with the given
+        // code surfaced through `e.code()`. Use this for non-Extension test cases.
         redis::RedisError::from((kind, code, msg.to_string()))
+    }
+
+    fn make_extension(code: &str, detail: &str) -> redis::RedisError {
+        // Mirrors a real wire error: ErrorRepr::Server(Extension { code, detail }).
+        // Use this for codes the redis crate doesn't have a ServerErrorKind for
+        // (WRONGTYPE, OOM, WRONGPASS, MODULE, etc.).
+        redis::make_extension_error(code.to_string(), Some(detail.to_string()))
     }
 
     #[test]
@@ -141,12 +158,9 @@ mod tests {
     }
 
     #[test]
-    fn classifies_oom_via_prefix() {
-        let e = make_err(
-            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
-            "oom",
-            "OOM command not allowed when used memory > 'maxmemory'",
-        );
+    fn classifies_oom_extension() {
+        // Real wire shape — `ErrorRepr::Server(Extension { code: "OOM", ... })`.
+        let e = make_extension("OOM", "command not allowed when used memory > 'maxmemory'");
         assert!(matches!(
             classify_error(&e),
             ExceptionClass::OutOfMemoryError
@@ -154,14 +168,8 @@ mod tests {
     }
 
     #[test]
-    fn classifies_auth_via_prefix() {
-        // The desc field becomes the prefix of the Display string;
-        // "wrongpass" uppercases to "WRONGPASS" which triggers the sniff.
-        let e = make_err(
-            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
-            "wrongpass",
-            "invalid username-password pair",
-        );
+    fn classifies_wrongpass_extension() {
+        let e = make_extension("WRONGPASS", "invalid username-password pair");
         assert!(matches!(
             classify_error(&e),
             ExceptionClass::AuthenticationError
@@ -169,13 +177,29 @@ mod tests {
     }
 
     #[test]
-    fn classifies_module_via_prefix() {
-        let e = make_err(
-            redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
-            "module",
-            "MODULE no such module 'rejson'",
-        );
+    fn classifies_noauth_extension() {
+        let e = make_extension("NOAUTH", "Authentication required.");
+        assert!(matches!(
+            classify_error(&e),
+            ExceptionClass::AuthenticationError
+        ));
+    }
+
+    #[test]
+    fn classifies_module_extension() {
+        let e = make_extension("MODULE_LOAD_FAILED", "no such module 'rejson'");
         assert!(matches!(classify_error(&e), ExceptionClass::ModuleError));
+    }
+
+    #[test]
+    fn classifies_wrongtype_extension_as_response_error() {
+        // The bug this test guards: WRONGTYPE arrives as Extension, not Server(ResponseError).
+        // Without `Extension` in the Layer 4 match, it would fall through to RedisError.
+        let e = make_extension(
+            "WRONGTYPE",
+            "Operation against a key holding the wrong kind of value",
+        );
+        assert!(matches!(classify_error(&e), ExceptionClass::ResponseError));
     }
 
     #[test]
@@ -190,8 +214,13 @@ mod tests {
 
     #[test]
     fn classifies_unknown_kind_as_redis_error_fallback() {
-        // Unknown ErrorKind shouldn't blow up — it should land in the fallback.
-        let e = make_err(redis::ErrorKind::Extension, "ext", "unknown");
+        // Truly unknown kinds (not Server / Parse / Extension) fall through to RedisError.
+        // Use a non-server kind that's not in any of the Layer 1-4 buckets.
+        let e = make_err(
+            redis::ErrorKind::UnexpectedReturnType,
+            "weird",
+            "unexpected reply",
+        );
         assert!(matches!(classify_error(&e), ExceptionClass::RedisError));
     }
 }
