@@ -29,6 +29,13 @@ pub enum RawResult {
     OptKeyAndBytesList(Option<(String, Vec<Vec<u8>>)>),
     OptKeyAndBytes(Option<(String, Vec<u8>)>),
     CursorAndStrings(u64, Vec<String>),
+    IntList(Vec<i64>),
+    HRandfield(redis::Value, Option<i64>, bool),
+    HScan {
+        cursor: u64,
+        value: redis::Value,
+        novalues: bool,
+    },
     Value(redis::Value),
     Error(crate::exceptions::ExceptionClass, String),
 }
@@ -169,6 +176,21 @@ impl RawResult {
                     .collect::<PyResult<_>>()?;
                 Ok(PyList::new(py, py_items)?.into_any().unbind())
             }
+            RawResult::IntList(items) => {
+                let py_items: Vec<Py<PyAny>> = items
+                    .into_iter()
+                    .map(|n| n.into_pyobject(py).unwrap().into_any().unbind())
+                    .collect();
+                Ok(PyList::new(py, py_items)?.into_any().unbind())
+            }
+            RawResult::HRandfield(v, count, withvalues) => {
+                crate::commands::hashes::render_hrandfield(py, v, count, withvalues)
+            }
+            RawResult::HScan {
+                cursor,
+                value,
+                novalues,
+            } => crate::commands::hashes::render_hscan(py, cursor, value, novalues),
             RawResult::Value(v) => redis_value_to_py(py, v),
             RawResult::Error(class, e) => Err(class.into_py_err(py, e)),
         }

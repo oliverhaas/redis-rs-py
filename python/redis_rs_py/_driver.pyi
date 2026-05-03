@@ -387,6 +387,173 @@ class RedisRsDriver:
         count: int = ...,
     ) -> Awaitable[tuple[str, list[bytes]] | None]: ...
 
+    # --- Hashes (Plan 05) ------------------------------------------------
+    def hget(self, key: str, field: str) -> bytes | None: ...
+    def ahget(self, key: str, field: str) -> Awaitable[bytes | None]: ...
+    def hset(
+        self,
+        key: str,
+        *items: str | bytes,
+        mapping: dict[str, bytes] | None = ...,
+    ) -> int: ...
+    def ahset(
+        self,
+        key: str,
+        *items: str | bytes,
+        mapping: dict[str, bytes] | None = ...,
+    ) -> Awaitable[int]: ...
+    def hsetnx(self, key: str, field: str, value: bytes) -> bool: ...
+    def ahsetnx(self, key: str, field: str, value: bytes) -> Awaitable[bool]: ...
+    def hmset(self, key: str, mapping: dict[str, bytes]) -> None: ...
+    def ahmset(self, key: str, mapping: dict[str, bytes]) -> Awaitable[None]: ...
+    def hgetall(self, key: str) -> dict[bytes, bytes]: ...
+    def ahgetall(self, key: str) -> Awaitable[dict[bytes, bytes]]: ...
+    def hmget(self, key: str, *fields: str) -> list[bytes | None]: ...
+    def ahmget(self, key: str, *fields: str) -> Awaitable[list[bytes | None]]: ...
+    def hdel(self, key: str, *fields: str) -> int: ...
+    def ahdel(self, key: str, *fields: str) -> Awaitable[int]: ...
+    def hexists(self, key: str, field: str) -> bool: ...
+    def ahexists(self, key: str, field: str) -> Awaitable[bool]: ...
+    def hlen(self, key: str) -> int: ...
+    def ahlen(self, key: str) -> Awaitable[int]: ...
+    def hkeys(self, key: str) -> list[bytes]: ...
+    def ahkeys(self, key: str) -> Awaitable[list[bytes]]: ...
+    def hvals(self, key: str) -> list[bytes]: ...
+    def ahvals(self, key: str) -> Awaitable[list[bytes]]: ...
+    def hincrby(self, key: str, field: str, amount: int) -> int: ...
+    def ahincrby(self, key: str, field: str, amount: int) -> Awaitable[int]: ...
+    def hincrbyfloat(self, key: str, field: str, amount: float) -> float: ...
+    def ahincrbyfloat(self, key: str, field: str, amount: float) -> Awaitable[float]: ...
+    def hrandfield(
+        self,
+        key: str,
+        count: int | None = ...,
+        withvalues: bool = ...,
+    ) -> bytes | list[bytes] | list[tuple[bytes, bytes]] | None: ...
+    def ahrandfield(
+        self,
+        key: str,
+        count: int | None = ...,
+        withvalues: bool = ...,
+    ) -> Awaitable[bytes | list[bytes] | list[tuple[bytes, bytes]] | None]: ...
+    def hscan(
+        self,
+        key: str,
+        *,
+        cursor: int = ...,
+        match: str | None = ...,
+        count: int | None = ...,
+        novalues: bool = ...,
+    ) -> tuple[int, dict[bytes, bytes] | list[bytes]]: ...
+    def ahscan(
+        self,
+        key: str,
+        *,
+        cursor: int = ...,
+        match: str | None = ...,
+        count: int | None = ...,
+        novalues: bool = ...,
+    ) -> Awaitable[tuple[int, dict[bytes, bytes] | list[bytes]]]: ...
+    # Hash-field TTL family (Redis 7.4+)
+    def hexpire(
+        self,
+        key: str,
+        fields: list[str],
+        time: int,
+        *,
+        nx: bool = ...,
+        xx: bool = ...,
+        gt: bool = ...,
+        lt: bool = ...,
+    ) -> list[int]: ...
+    def ahexpire(
+        self,
+        key: str,
+        fields: list[str],
+        time: int,
+        *,
+        nx: bool = ...,
+        xx: bool = ...,
+        gt: bool = ...,
+        lt: bool = ...,
+    ) -> Awaitable[list[int]]: ...
+    def hpexpire(
+        self,
+        key: str,
+        fields: list[str],
+        time: int,
+        *,
+        nx: bool = ...,
+        xx: bool = ...,
+        gt: bool = ...,
+        lt: bool = ...,
+    ) -> list[int]: ...
+    def ahpexpire(
+        self,
+        key: str,
+        fields: list[str],
+        time: int,
+        *,
+        nx: bool = ...,
+        xx: bool = ...,
+        gt: bool = ...,
+        lt: bool = ...,
+    ) -> Awaitable[list[int]]: ...
+    def hexpireat(
+        self,
+        key: str,
+        fields: list[str],
+        time: int,
+        *,
+        nx: bool = ...,
+        xx: bool = ...,
+        gt: bool = ...,
+        lt: bool = ...,
+    ) -> list[int]: ...
+    def ahexpireat(
+        self,
+        key: str,
+        fields: list[str],
+        time: int,
+        *,
+        nx: bool = ...,
+        xx: bool = ...,
+        gt: bool = ...,
+        lt: bool = ...,
+    ) -> Awaitable[list[int]]: ...
+    def hpexpireat(
+        self,
+        key: str,
+        fields: list[str],
+        time: int,
+        *,
+        nx: bool = ...,
+        xx: bool = ...,
+        gt: bool = ...,
+        lt: bool = ...,
+    ) -> list[int]: ...
+    def ahpexpireat(
+        self,
+        key: str,
+        fields: list[str],
+        time: int,
+        *,
+        nx: bool = ...,
+        xx: bool = ...,
+        gt: bool = ...,
+        lt: bool = ...,
+    ) -> Awaitable[list[int]]: ...
+    def hexpiretime(self, key: str, fields: list[str]) -> list[int]: ...
+    def ahexpiretime(self, key: str, fields: list[str]) -> Awaitable[list[int]]: ...
+    def hpexpiretime(self, key: str, fields: list[str]) -> list[int]: ...
+    def ahpexpiretime(self, key: str, fields: list[str]) -> Awaitable[list[int]]: ...
+    def httl(self, key: str, fields: list[str]) -> list[int]: ...
+    def ahttl(self, key: str, fields: list[str]) -> Awaitable[list[int]]: ...
+    def hpttl(self, key: str, fields: list[str]) -> list[int]: ...
+    def ahpttl(self, key: str, fields: list[str]) -> Awaitable[list[int]]: ...
+    def hpersist(self, key: str, fields: list[str]) -> list[int]: ...
+    def ahpersist(self, key: str, fields: list[str]) -> Awaitable[list[int]]: ...
+
     # --- Test-only -----------------------------------------------------
     def _blocking_initialised(self) -> bool: ...
 

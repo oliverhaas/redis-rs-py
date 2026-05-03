@@ -901,6 +901,229 @@ impl ValkeyConnInner {
     }
 }
 
+// =========================================================================
+// Hash commands on ValkeyConnInner
+// =========================================================================
+
+impl ValkeyConnInner {
+    pub async fn hget(&mut self, key: &str, field: &str) -> redis::RedisResult<Option<Vec<u8>>> {
+        let mut cmd = redis::cmd("HGET");
+        cmd.arg(key).arg(field);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hget_multiple(
+        &mut self,
+        key: &str,
+        fields: &[String],
+    ) -> redis::RedisResult<Vec<Option<Vec<u8>>>> {
+        let mut cmd = redis::cmd("HMGET");
+        cmd.arg(key);
+        for f in fields {
+            cmd.arg(f.as_str());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hset_multiple(
+        &mut self,
+        key: &str,
+        pairs: &[(String, Vec<u8>)],
+    ) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("HSET");
+        cmd.arg(key);
+        for (f, v) in pairs {
+            cmd.arg(f.as_str()).arg(v.as_slice());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hset_multiple_void(
+        &mut self,
+        key: &str,
+        pairs: &[(String, Vec<u8>)],
+    ) -> redis::RedisResult<()> {
+        let mut cmd = redis::cmd("HSET");
+        cmd.arg(key);
+        for (f, v) in pairs {
+            cmd.arg(f.as_str()).arg(v.as_slice());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hset_nx(
+        &mut self,
+        key: &str,
+        field: &str,
+        value: &[u8],
+    ) -> redis::RedisResult<bool> {
+        let mut cmd = redis::cmd("HSETNX");
+        cmd.arg(key).arg(field).arg(value);
+        let n: i64 = crate::dispatch_cmd!(self, cmd)?;
+        Ok(n == 1)
+    }
+
+    pub async fn hgetall(&mut self, key: &str) -> redis::RedisResult<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut cmd = redis::cmd("HGETALL");
+        cmd.arg(key);
+        let val: redis::Value = crate::dispatch_cmd!(self, cmd)?;
+        // RESP2: flat Array [f, v, f, v, ...]
+        // RESP3: Map entries
+        match val {
+            redis::Value::Map(pairs) => {
+                let mut out = Vec::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    let field: Vec<u8> = redis::from_redis_value(k)?;
+                    let value: Vec<u8> = redis::from_redis_value(v)?;
+                    out.push((field, value));
+                }
+                Ok(out)
+            }
+            redis::Value::Array(items) => {
+                let mut out = Vec::new();
+                let mut iter = items.into_iter();
+                while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+                    let field: Vec<u8> = redis::from_redis_value(k)?;
+                    let value: Vec<u8> = redis::from_redis_value(v)?;
+                    out.push((field, value));
+                }
+                Ok(out)
+            }
+            redis::Value::Nil => Ok(Vec::new()),
+            other => Ok(redis::from_redis_value(other)?),
+        }
+    }
+
+    pub async fn hdel(&mut self, key: &str, fields: &[String]) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("HDEL");
+        cmd.arg(key);
+        for f in fields {
+            cmd.arg(f.as_str());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hexists(&mut self, key: &str, field: &str) -> redis::RedisResult<bool> {
+        let mut cmd = redis::cmd("HEXISTS");
+        cmd.arg(key).arg(field);
+        let n: i64 = crate::dispatch_cmd!(self, cmd)?;
+        Ok(n == 1)
+    }
+
+    pub async fn hlen(&mut self, key: &str) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("HLEN");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hkeys(&mut self, key: &str) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("HKEYS");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hvals(&mut self, key: &str) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("HVALS");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hincrby(
+        &mut self,
+        key: &str,
+        field: &str,
+        amount: i64,
+    ) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("HINCRBY");
+        cmd.arg(key).arg(field).arg(amount);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hincrbyfloat(
+        &mut self,
+        key: &str,
+        field: &str,
+        amount: f64,
+    ) -> redis::RedisResult<f64> {
+        let mut cmd = redis::cmd("HINCRBYFLOAT");
+        cmd.arg(key).arg(field).arg(amount);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hrandfield_raw(
+        &mut self,
+        key: &str,
+        count: Option<i64>,
+        withvalues: bool,
+    ) -> redis::RedisResult<redis::Value> {
+        let mut cmd = redis::cmd("HRANDFIELD");
+        cmd.arg(key);
+        if let Some(c) = count {
+            cmd.arg(c);
+            if withvalues {
+                cmd.arg("WITHVALUES");
+            }
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hscan_raw(
+        &mut self,
+        key: &str,
+        cursor: u64,
+        pattern: Option<&str>,
+        count: Option<i64>,
+        novalues: bool,
+    ) -> redis::RedisResult<redis::Value> {
+        let mut cmd = redis::cmd("HSCAN");
+        cmd.arg(key).arg(cursor);
+        if let Some(p) = pattern {
+            cmd.arg("MATCH").arg(p);
+        }
+        if let Some(c) = count {
+            cmd.arg("COUNT").arg(c);
+        }
+        if novalues {
+            cmd.arg("NOVALUES");
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn hexpire_family(
+        &mut self,
+        command: &'static str,
+        key: &str,
+        fields: &[String],
+        time: i64,
+        modifier: Option<&'static str>,
+    ) -> redis::RedisResult<Vec<i64>> {
+        let mut cmd = redis::cmd(command);
+        cmd.arg(key).arg(time);
+        if let Some(m) = modifier {
+            cmd.arg(m);
+        }
+        cmd.arg("FIELDS").arg(fields.len());
+        for f in fields {
+            cmd.arg(f.as_str());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn httl_family(
+        &mut self,
+        command: &'static str,
+        key: &str,
+        fields: &[String],
+    ) -> redis::RedisResult<Vec<i64>> {
+        let mut cmd = redis::cmd(command);
+        cmd.arg(key).arg("FIELDS").arg(fields.len());
+        for f in fields {
+            cmd.arg(f.as_str());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+}
+
 async fn bpop_inner(
     conn: &mut ValkeyConnInner,
     command: &'static str,

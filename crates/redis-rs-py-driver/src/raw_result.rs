@@ -141,6 +141,12 @@ impl From<(u64, Vec<String>)> for RawResult {
     }
 }
 
+impl From<Vec<i64>> for RawResult {
+    fn from(v: Vec<i64>) -> Self {
+        RawResult::IntList(v)
+    }
+}
+
 impl From<redis::Value> for RawResult {
     fn from(v: redis::Value) -> Self {
         RawResult::Value(v)
