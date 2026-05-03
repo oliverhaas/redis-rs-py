@@ -37,12 +37,45 @@ def _spawn_valkey() -> tuple[DockerContainer, str]:
     return container, f"redis://{host}:{port}/0"
 
 
+def _worker_db(worker_id: str) -> int:
+    """Map an xdist worker_id to a Valkey DB index in the range [0, 15].
+
+    Without per-worker isolation, parallel workers stomp on each other's keys
+    (worker A SETs "a", worker B FLUSHDBs, worker A's count assertion fails).
+    Valkey ships 16 numbered DBs by default — one per worker keeps fixtures
+    independent.
+    """
+    if worker_id == "master":
+        return 0
+    # worker_id is "gw0", "gw1", ... under xdist. Strip "gw" and mod 16.
+    digits = worker_id.removeprefix("gw")
+    if digits.isdigit():
+        return int(digits) % 16
+    # Defensive fallback: hash the id deterministically.
+    return abs(hash(worker_id)) % 16
+
+
+def _with_db(url: str, db: int) -> str:
+    """Return `url` with its trailing /<n> path segment replaced by /<db>."""
+    base, _, _ = url.rpartition("/")
+    return f"{base}/{db}"
+
+
 @pytest.fixture(scope="session")
-def valkey_url(tmp_path_factory: pytest.TempPathFactory, worker_id: str) -> Iterator[str]:
+def valkey_url(
+    tmp_path_factory: pytest.TempPathFactory,
+    worker_id: str,
+) -> Iterator[str]:
+    """Per-worker DB-isolated Valkey URL.
+
+    Workers share one container (cheap) but each gets its own DB index so
+    test fixtures running in parallel don't race each other's keys.
+    """
+    db = _worker_db(worker_id)
     if worker_id == "master":
         container, url = _spawn_valkey()
         try:
-            yield url
+            yield _with_db(url, db)
         finally:
             container.stop()
         return
@@ -53,14 +86,14 @@ def valkey_url(tmp_path_factory: pytest.TempPathFactory, worker_id: str) -> Iter
 
     with FileLock(str(lockfile)):
         if urlfile.exists():
-            url = urlfile.read_text().strip()
+            base_url = urlfile.read_text().strip()
         else:
-            container, url = _spawn_valkey()
-            urlfile.write_text(url)
+            container, base_url = _spawn_valkey()
+            urlfile.write_text(base_url)
             # Pin the container at module level — see _PINNED_CONTAINERS comment.
             _PINNED_CONTAINERS.append(container)
 
-    yield url
+    yield _with_db(base_url, db)
 
 
 @pytest.fixture
@@ -68,8 +101,8 @@ def driver(valkey_url: str):
     from redis_rs_py._driver import RedisRsDriver  # noqa: PLC0415
 
     drv = RedisRsDriver.connect_standard(valkey_url)
-    # FLUSHDB so each test starts clean. We call sync `flushdb` once it lands;
-    # for now use the upstream redis-py client.
+    # FLUSHDB the per-worker DB so each test starts clean. (We call sync
+    # `flushdb` once it lands; for now use the upstream redis-py client.)
     import redis  # noqa: PLC0415
 
     rp = redis.Redis.from_url(valkey_url)
