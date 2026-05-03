@@ -7,6 +7,7 @@
 // diverge, open a discussion first — the design is load-bearing.
 
 mod async_bridge;
+mod commands;
 mod connection;
 mod driver;
 mod errors;

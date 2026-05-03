@@ -45,17 +45,9 @@ async def test_aping(driver) -> None:
     assert await driver.aping() is True
 
 
-def test_set_with_ttl(driver, valkey_url: str) -> None:
-    driver.set("key", b"value", ttl=60)
-    # Use the upstream client to verify TTL was applied (no `ttl` command yet).
-    # Pass the raw `valkey_url` rather than `driver.connection_url`; the latter
-    # carries the redis-rs-specific `?protocol=resp3` query param which redis-py
-    # rejects ("protocol must be an integer" — redis-py expects 2 or 3).
-    import redis as upstream  # noqa: PLC0415
-
-    rp = upstream.Redis.from_url(valkey_url)
-    assert 0 < rp.ttl("key") <= 60
-    rp.close()
+def test_set_with_ttl(driver) -> None:
+    driver.set("key", b"value", ex=60)
+    assert 0 < driver.ttl("key") <= 60
 
 
 def test_connect_standard_bad_url_raises_connection_error() -> None:

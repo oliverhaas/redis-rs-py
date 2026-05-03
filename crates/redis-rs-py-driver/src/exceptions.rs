@@ -80,6 +80,7 @@ create_exception!(redis_rs_py._driver.exceptions, TryAgainError, ClusterError);
 /// Discriminant carried through `RawResult::Error` so the async path can
 /// raise the same exception class the sync path would.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)] // Variants reserved for future command plans (04–09).
 pub enum ExceptionClass {
     RedisError,
     ConnectionError,

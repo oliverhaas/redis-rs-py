@@ -12,7 +12,10 @@ name = "_driver"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = [
+  "extension-module",
+  "multiple-pymethods",
+] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 redis = { version = "1", features = [
   "tokio-comp",

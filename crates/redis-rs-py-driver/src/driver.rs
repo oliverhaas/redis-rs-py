@@ -115,7 +115,7 @@ pub(crate) fn py_tuple2(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<
 
 #[pyclass(module = "redis_rs_py._driver")]
 pub struct RedisRsDriver {
-    connection: ValkeyConn,
+    pub(crate) connection: ValkeyConn,
     url: String,
 }
 
@@ -202,39 +202,6 @@ impl RedisRsDriver {
         let key = key.to_string();
         async_op!(self, py, conn, async {
             let r: redis::RedisResult<Option<Vec<u8>>> = conn_method!(&mut *conn, c, c.get(&key));
-            r.into_raw_result()
-        })
-    }
-
-    // --- set / aset --------------------------------------------------------
-
-    #[pyo3(signature = (key, value, ttl=None))]
-    fn set(&self, py: Python<'_>, key: &str, value: &[u8], ttl: Option<u64>) -> PyResult<()> {
-        let value = value.to_vec();
-        let r: redis::RedisResult<()> = sync_op!(py, self, conn, async {
-            match ttl {
-                Some(s) => conn_method!(&mut *conn, c, c.set_ex::<_, _, ()>(key, value, s)),
-                None => conn_method!(&mut *conn, c, c.set::<_, _, ()>(key, value)),
-            }
-        });
-        r.map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (key, value, ttl=None))]
-    fn aset(
-        &self,
-        py: Python<'_>,
-        key: &str,
-        value: &[u8],
-        ttl: Option<u64>,
-    ) -> PyResult<Py<PyAny>> {
-        let key = key.to_string();
-        let value = value.to_vec();
-        async_op!(self, py, conn, async {
-            let r: redis::RedisResult<()> = match ttl {
-                Some(s) => conn_method!(&mut *conn, c, c.set_ex::<_, _, ()>(&key, value, s)),
-                None => conn_method!(&mut *conn, c, c.set::<_, _, ()>(&key, value)),
-            };
             r.into_raw_result()
         })
     }

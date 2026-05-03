@@ -1,0 +1,15 @@
+# Cargo workspace configuration.
+#
+# `cargo test --lib` for crates that use pyo3 with `multiple-pymethods` requires
+# libpython at link time. The `pyo3-build-config` build script emits the correct
+# `-lpython` rustc-link-lib directive for `cdylib` targets; for `--lib` test
+# binaries the linker flag must be provided explicitly, because the cdylib build
+# script only runs for the extension-module target.
+#
+# Set PYO3_PYTHON and LD_LIBRARY_PATH before running `cargo test --lib`:
+#
+#   export PYO3_PYTHON=$(uv run python -c "import sys; print(sys.executable)")
+#   export PYLIB=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+#   export LD_LIBRARY_PATH=$PYLIB
+#   export RUSTFLAGS="-L $PYLIB -lpython$(uv run python -c 'import sys; v=sys.version_info; print(f\"{v.major}.{v.minor}\")')"
+#   cargo test -p redis-rs-py-driver --lib
