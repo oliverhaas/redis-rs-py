@@ -115,7 +115,11 @@ unresolved-attribute = "ignore"
 invalid-argument-type = "ignore"
 
 [tool.pytest.ini_options]
-addopts = "--cov=redis_rs_py --cov-report=term-missing --cov-report=xml --no-cov-on-fail --maxprocesses=16"
+# Cap xdist at 15 workers: testcontainers Valkey ships 16 numbered DBs (0-15);
+# each worker takes one DB slot for isolation (see conftest.py::_worker_db),
+# and DB 15 is reserved as the destination for cross-DB tests like
+# test_copy_with_db_to_other_db so they don't race a worker's FLUSHDB.
+addopts = "--cov=redis_rs_py --cov-report=term-missing --cov-report=xml --no-cov-on-fail --maxprocesses=15"
 testpaths = ["tests"]
 xfail_strict = true
 asyncio_mode = "auto"
