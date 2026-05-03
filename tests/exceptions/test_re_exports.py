@@ -49,7 +49,12 @@ def test_top_level_reexport_is_identical_to_module_class(name: str) -> None:
 def test_redis_py_user_idiom_works() -> None:
     """A redis-py user does `from redis_rs_py import RedisError, ConnectionError`
     and catches both. We must not collide with builtins.ConnectionError."""
+    import builtins  # noqa: PLC0415
+
     from redis_rs_py import ConnectionError, RedisError  # noqa: PLC0415
 
     assert issubclass(ConnectionError, RedisError)
-    assert ConnectionError is not __builtins__["ConnectionError"]  # type: ignore[index]
+    # Use the `builtins` module rather than `__builtins__` indexing — the latter
+    # is dict-typed in module scope but module-typed under `__main__` (CPython
+    # quirk) and is wholly different on PyPy.
+    assert ConnectionError is not builtins.ConnectionError
