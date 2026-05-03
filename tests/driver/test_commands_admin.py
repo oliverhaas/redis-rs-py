@@ -8,6 +8,11 @@ import time
 import pytest
 from redis_rs_py.exceptions import DataError, ResponseError
 
+# FLUSHALL, CONFIG SET, CLIENT PAUSE/KILL/SETNAME and similar admin commands
+# mutate server-global state (not per-DB), so parallel xdist workers race
+# each other. Run all admin tests on the same worker via xdist_group.
+pytestmark = pytest.mark.xdist_group(name="redis_global_state")
+
 
 class TestScan:
     def test_scan_single_iteration_empty_db(self, driver) -> None:
@@ -162,13 +167,27 @@ class TestFlushdb:
         assert driver.dbsize() == 0
 
 
+def _is_xdist_worker(request: pytest.FixtureRequest) -> bool:
+    """True when running under pytest-xdist with parallel workers."""
+    return getattr(request.config, "workerinput", None) is not None
+
+
 class TestFlushall:
-    def test_flushall_default(self, driver) -> None:
+    """FLUSHALL purges every DB on the server, so it can't safely run while
+    other xdist workers have data in their per-worker DBs. Skip these tests
+    under ``-n auto``; run them serially via ``pytest tests/driver/test_commands_admin.py``.
+    """
+
+    def test_flushall_default(self, driver, request) -> None:
+        if _is_xdist_worker(request):
+            pytest.skip("FLUSHALL would race other xdist workers' DBs")
         driver.set("a", b"v")
         driver.flushall()
         assert driver.dbsize() == 0
 
-    def test_flushall_async(self, driver) -> None:
+    def test_flushall_async(self, driver, request) -> None:
+        if _is_xdist_worker(request):
+            pytest.skip("FLUSHALL would race other xdist workers' DBs")
         driver.set("a", b"v")
         driver.flushall(asynchronous=True)
         time.sleep(0.05)

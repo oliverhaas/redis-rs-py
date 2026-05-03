@@ -115,11 +115,15 @@ unresolved-attribute = "ignore"
 invalid-argument-type = "ignore"
 
 [tool.pytest.ini_options]
-# Cap xdist at 15 workers: testcontainers Valkey ships 16 numbered DBs (0-15);
-# each worker takes one DB slot for isolation (see conftest.py::_worker_db),
-# and DB 15 is reserved as the destination for cross-DB tests like
-# test_copy_with_db_to_other_db so they don't race a worker's FLUSHDB.
-addopts = "--cov=redis_rs_py --cov-report=term-missing --cov-report=xml --no-cov-on-fail --maxprocesses=15"
+# --maxprocesses=15: testcontainers Valkey ships 16 numbered DBs (0-15); each
+#   worker takes one DB slot for isolation (see conftest.py::_worker_db), and
+#   DB 15 is reserved as the destination for cross-DB tests like
+#   test_copy_with_db_to_other_db so they don't race a worker's FLUSHDB.
+# --dist=loadgroup: required for `pytest.mark.xdist_group` to take effect.
+#   Tests sharing a group land on the same worker. Used by
+#   test_commands_scripts.py and test_commands_admin.py to serialise tests
+#   that touch server-global state (script cache, function library, etc.).
+addopts = "--cov=redis_rs_py --cov-report=term-missing --cov-report=xml --no-cov-on-fail --maxprocesses=15 --dist=loadgroup"
 testpaths = ["tests"]
 xfail_strict = true
 asyncio_mode = "auto"

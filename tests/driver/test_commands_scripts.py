@@ -7,6 +7,14 @@ import contextlib
 import pytest
 from redis_rs_py.exceptions import DataError, NoScriptError, ResponseError
 
+# Script and function state lives on the SERVER, not in the per-worker DB.
+# SCRIPT LOAD / FLUSH and FUNCTION LOAD / LIST / FLUSH all touch the same
+# server-global cache, so parallel workers race each other (one worker's
+# SCRIPT FLUSH purges another worker's just-loaded SHA). The xdist_group
+# mark forces every test in this file onto the same worker, serialising the
+# global-state mutations.
+pytestmark = pytest.mark.xdist_group(name="redis_global_state")
+
 # Standard Lua script: returns the first key.
 ECHO_KEY_SCRIPT = "return KEYS[1]"
 INCR_BY_SCRIPT = "redis.call('SET', KEYS[1], ARGV[1]); return redis.call('GET', KEYS[1])"
