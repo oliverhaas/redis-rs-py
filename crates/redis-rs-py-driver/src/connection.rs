@@ -363,6 +363,12 @@ impl ValkeyConnInner {
         Ok(r == 1)
     }
 
+    pub async fn incr(&mut self, key: &str) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("INCR");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
     pub async fn incrby(&mut self, key: &str, delta: i64) -> redis::RedisResult<i64> {
         let mut cmd = redis::cmd("INCRBY");
         cmd.arg(key).arg(delta);
@@ -370,16 +376,18 @@ impl ValkeyConnInner {
     }
 
     pub async fn incrbyfloat(&mut self, key: &str, delta: f64) -> redis::RedisResult<f64> {
+        // Under RESP3, INCRBYFLOAT returns Value::Double, and redis-rs's
+        // FromRedisValue<f64> handles it directly. Decoding via String first
+        // forces an extra to_string()/parse round-trip with no benefit.
         let mut cmd = redis::cmd("INCRBYFLOAT");
         cmd.arg(key).arg(delta);
-        let s: String = crate::dispatch_cmd!(self, cmd)?;
-        s.parse::<f64>().map_err(|e| {
-            redis::RedisError::from((
-                redis::ErrorKind::UnexpectedReturnType,
-                "INCRBYFLOAT response was not a valid float",
-                e.to_string(),
-            ))
-        })
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn decr(&mut self, key: &str) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("DECR");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
     }
 
     pub async fn decrby(&mut self, key: &str, delta: i64) -> redis::RedisResult<i64> {

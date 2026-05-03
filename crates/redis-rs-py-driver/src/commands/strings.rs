@@ -406,13 +406,13 @@ impl RedisRsDriver {
     // ----- INCR / aINCR --------------------------------------------------
 
     fn incr(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.incrby(name, 1).await }).map_err(to_py_err)
+        sync_op!(py, self, conn, async { conn.incr(name).await }).map_err(to_py_err)
     }
 
     fn aincr(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
-            conn.incrby(&name, 1).await.into_raw_result()
+            conn.incr(&name).await.into_raw_result()
         })
     }
 
@@ -448,13 +448,13 @@ impl RedisRsDriver {
     // ----- DECR / aDECR --------------------------------------------------
 
     fn decr(&self, py: Python<'_>, name: &str) -> PyResult<i64> {
-        sync_op!(py, self, conn, async { conn.decrby(name, 1).await }).map_err(to_py_err)
+        sync_op!(py, self, conn, async { conn.decr(name).await }).map_err(to_py_err)
     }
 
     fn adecr(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let name = name.to_string();
         async_op!(self, py, conn, async {
-            conn.decrby(&name, 1).await.into_raw_result()
+            conn.decr(&name).await.into_raw_result()
         })
     }
 
