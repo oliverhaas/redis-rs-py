@@ -11,6 +11,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PySet, PyString, PyTuple};
 
+#[allow(clippy::type_complexity)]
 pub enum RawResult {
     Nil,
     OptBytes(Option<Vec<u8>>),
@@ -44,6 +45,25 @@ pub enum RawResult {
     SScan {
         cursor: u64,
         members: Vec<Vec<u8>>,
+    },
+    // ZADD INCR mode → float | None
+    OptScore(Option<f64>),
+    // ZRANK WITHSCORE → (rank, score) | None
+    OptRankAndScore(Option<(i64, f64)>),
+    // ZMPOP / BZMPOP → (key, [(member, score), ...]) | None
+    OptKeyAndScoredMembers(Option<(String, Vec<(Vec<u8>, f64)>)>),
+    // BZPOPMIN / BZPOPMAX → (key, member, score) | None
+    OptKeyMemberScore(Option<(Vec<u8>, Vec<u8>, f64)>),
+    // ZRANDMEMBER with count/withscores
+    ZRandmember {
+        value: redis::Value,
+        count: Option<i64>,
+        withscores: bool,
+    },
+    // ZSCAN → (cursor, list[tuple[bytes, float]])
+    ZScan {
+        cursor: u64,
+        items: Vec<(Vec<u8>, f64)>,
     },
     Value(redis::Value),
     Error(crate::exceptions::ExceptionClass, String),
@@ -223,6 +243,53 @@ impl RawResult {
                 Ok(PyTuple::new(py, [cursor_py, py_set.into_any().unbind()])?
                     .into_any()
                     .unbind())
+            }
+            RawResult::OptScore(Some(f)) => Ok(f.into_pyobject(py)?.into_any().unbind()),
+            RawResult::OptScore(None) => Ok(py.None()),
+            RawResult::OptRankAndScore(Some((rank, score))) => {
+                let r = rank.into_pyobject(py)?.into_any().unbind();
+                let s = score.into_pyobject(py)?.into_any().unbind();
+                Ok(PyTuple::new(py, [r, s])?.into_any().unbind())
+            }
+            RawResult::OptRankAndScore(None) => Ok(py.None()),
+            RawResult::OptKeyAndScoredMembers(Some((key, items))) => {
+                let py_items: Vec<Py<PyAny>> = items
+                    .into_iter()
+                    .map(|(m, s)| {
+                        let m_py = PyBytes::new(py, &m).into_any().unbind();
+                        let s_py = s.into_pyobject(py)?.into_any().unbind();
+                        Ok(PyTuple::new(py, [m_py, s_py])?.into_any().unbind())
+                    })
+                    .collect::<PyResult<_>>()?;
+                let key_py = PyString::new(py, &key).into_any().unbind();
+                let list_py = PyList::new(py, py_items)?.into_any().unbind();
+                Ok(PyTuple::new(py, [key_py, list_py])?.into_any().unbind())
+            }
+            RawResult::OptKeyAndScoredMembers(None) => Ok(py.None()),
+            RawResult::OptKeyMemberScore(Some((k, m, s))) => {
+                let k_py = PyBytes::new(py, &k).into_any().unbind();
+                let m_py = PyBytes::new(py, &m).into_any().unbind();
+                let s_py = s.into_pyobject(py)?.into_any().unbind();
+                Ok(PyTuple::new(py, [k_py, m_py, s_py])?.into_any().unbind())
+            }
+            RawResult::OptKeyMemberScore(None) => Ok(py.None()),
+            RawResult::ZRandmember {
+                value,
+                count,
+                withscores,
+            } => crate::commands::zsets::render_zrandmember(py, value, count, withscores),
+            RawResult::ZScan { cursor, items } => {
+                let cursor_py = cursor.into_pyobject(py)?.into_any().unbind();
+                let py_items: Vec<Py<PyAny>> = items
+                    .into_iter()
+                    .map(|(m, s)| {
+                        let m_py = PyBytes::new(py, &m).into_any().unbind();
+                        let s_py = s.into_pyobject(py)?.into_any().unbind();
+                        Ok(PyTuple::new(py, [m_py, s_py])?.into_any().unbind())
+                    })
+                    .collect::<PyResult<_>>()?;
+                let list_py = PyList::new(py, py_items)?.into_any().unbind();
+                Ok(PyTuple::new(py, [cursor_py, list_py])?.into_any().unbind())
             }
             RawResult::Value(v) => redis_value_to_py(py, v),
             RawResult::Error(class, e) => Err(class.into_py_err(py, e)),

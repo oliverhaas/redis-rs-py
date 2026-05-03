@@ -611,6 +611,300 @@ class RedisRsDriver:
         count: int | None = ...,
     ) -> Awaitable[tuple[int, _Set[bytes]]]: ...
 
+    # --- Sorted sets (Plan 07) -------------------------------------------
+    def zadd(
+        self,
+        key: str,
+        *,
+        mapping: dict[str | bytes, float],
+        nx: bool = ...,
+        xx: bool = ...,
+        gt: bool = ...,
+        lt: bool = ...,
+        ch: bool = ...,
+        incr: bool = ...,
+    ) -> int | float | None: ...
+    def azadd(
+        self,
+        key: str,
+        *,
+        mapping: dict[str | bytes, float],
+        nx: bool = ...,
+        xx: bool = ...,
+        gt: bool = ...,
+        lt: bool = ...,
+        ch: bool = ...,
+        incr: bool = ...,
+    ) -> Awaitable[int | float | None]: ...
+    def zrem(self, key: str, *members: bytes) -> int: ...
+    def azrem(self, key: str, *members: bytes) -> Awaitable[int]: ...
+    def zrange(
+        self,
+        key: str,
+        start: int | str | bytes,
+        stop: int | str | bytes,
+        *,
+        desc: bool = ...,
+        byscore: bool = ...,
+        bylex: bool = ...,
+        withscores: bool = ...,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> list[bytes] | list[tuple[bytes, float]]: ...
+    def azrange(
+        self,
+        key: str,
+        start: int | str | bytes,
+        stop: int | str | bytes,
+        *,
+        desc: bool = ...,
+        byscore: bool = ...,
+        bylex: bool = ...,
+        withscores: bool = ...,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> Awaitable[list[bytes] | list[tuple[bytes, float]]]: ...
+    def zrangestore(
+        self,
+        destination: str,
+        source: str,
+        start: int | str | bytes,
+        stop: int | str | bytes,
+        *,
+        desc: bool = ...,
+        byscore: bool = ...,
+        bylex: bool = ...,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> int: ...
+    def azrangestore(
+        self,
+        destination: str,
+        source: str,
+        start: int | str | bytes,
+        stop: int | str | bytes,
+        *,
+        desc: bool = ...,
+        byscore: bool = ...,
+        bylex: bool = ...,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> Awaitable[int]: ...
+    def zrangebyscore(
+        self,
+        key: str,
+        min: str,
+        max: str,
+        *,
+        withscores: bool = ...,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> list[bytes] | list[tuple[bytes, float]]: ...
+    def azrangebyscore(
+        self,
+        key: str,
+        min: str,
+        max: str,
+        *,
+        withscores: bool = ...,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> Awaitable[list[bytes] | list[tuple[bytes, float]]]: ...
+    def zrevrangebyscore(
+        self,
+        key: str,
+        max: str,
+        min: str,
+        *,
+        withscores: bool = ...,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> list[bytes] | list[tuple[bytes, float]]: ...
+    def azrevrangebyscore(
+        self,
+        key: str,
+        max: str,
+        min: str,
+        *,
+        withscores: bool = ...,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> Awaitable[list[bytes] | list[tuple[bytes, float]]]: ...
+    def zrangebylex(
+        self,
+        key: str,
+        min: str,
+        max: str,
+        *,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> list[bytes]: ...
+    def azrangebylex(
+        self,
+        key: str,
+        min: str,
+        max: str,
+        *,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> Awaitable[list[bytes]]: ...
+    def zrevrangebylex(
+        self,
+        key: str,
+        max: str,
+        min: str,
+        *,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> list[bytes]: ...
+    def azrevrangebylex(
+        self,
+        key: str,
+        max: str,
+        min: str,
+        *,
+        offset: int | None = ...,
+        num: int | None = ...,
+    ) -> Awaitable[list[bytes]]: ...
+    def zincrby(self, key: str, amount: float, member: bytes) -> float: ...
+    def azincrby(self, key: str, amount: float, member: bytes) -> Awaitable[float]: ...
+    def zcard(self, key: str) -> int: ...
+    def azcard(self, key: str) -> Awaitable[int]: ...
+    def zscore(self, key: str, member: bytes) -> float | None: ...
+    def azscore(self, key: str, member: bytes) -> Awaitable[float | None]: ...
+    def zmscore(self, key: str, *members: bytes) -> list[float | None]: ...
+    def azmscore(self, key: str, *members: bytes) -> Awaitable[list[float | None]]: ...
+    def zrank(self, key: str, member: bytes, *, withscore: bool = ...) -> int | tuple[int, float] | None: ...
+    def azrank(
+        self, key: str, member: bytes, *, withscore: bool = ...
+    ) -> Awaitable[int | tuple[int, float] | None]: ...
+    def zrevrank(self, key: str, member: bytes, *, withscore: bool = ...) -> int | tuple[int, float] | None: ...
+    def azrevrank(
+        self, key: str, member: bytes, *, withscore: bool = ...
+    ) -> Awaitable[int | tuple[int, float] | None]: ...
+    def zremrangebyrank(self, key: str, start: int, stop: int) -> int: ...
+    def azremrangebyrank(self, key: str, start: int, stop: int) -> Awaitable[int]: ...
+    def zremrangebyscore(self, key: str, min: str, max: str) -> int: ...
+    def azremrangebyscore(self, key: str, min: str, max: str) -> Awaitable[int]: ...
+    def zremrangebylex(self, key: str, min: str, max: str) -> int: ...
+    def azremrangebylex(self, key: str, min: str, max: str) -> Awaitable[int]: ...
+    def zcount(self, key: str, min: str, max: str) -> int: ...
+    def azcount(self, key: str, min: str, max: str) -> Awaitable[int]: ...
+    def zlexcount(self, key: str, min: str, max: str) -> int: ...
+    def azlexcount(self, key: str, min: str, max: str) -> Awaitable[int]: ...
+    def zpopmin(self, key: str, *, count: int = ...) -> list[tuple[bytes, float]]: ...
+    def azpopmin(self, key: str, *, count: int = ...) -> Awaitable[list[tuple[bytes, float]]]: ...
+    def zpopmax(self, key: str, *, count: int = ...) -> list[tuple[bytes, float]]: ...
+    def azpopmax(self, key: str, *, count: int = ...) -> Awaitable[list[tuple[bytes, float]]]: ...
+    def zmpop(self, *keys: str, direction: str, count: int = ...) -> tuple[str, list[tuple[bytes, float]]] | None: ...
+    def azmpop(
+        self, *keys: str, direction: str, count: int = ...
+    ) -> Awaitable[tuple[str, list[tuple[bytes, float]]] | None]: ...
+    def bzpopmin(self, *keys: str, timeout: float) -> tuple[bytes, bytes, float] | None: ...
+    def abzpopmin(self, *keys: str, timeout: float) -> Awaitable[tuple[bytes, bytes, float] | None]: ...
+    def bzpopmax(self, *keys: str, timeout: float) -> tuple[bytes, bytes, float] | None: ...
+    def abzpopmax(self, *keys: str, timeout: float) -> Awaitable[tuple[bytes, bytes, float] | None]: ...
+    def bzmpop(
+        self, *keys: str, direction: str, timeout: float, count: int = ...
+    ) -> tuple[str, list[tuple[bytes, float]]] | None: ...
+    def abzmpop(
+        self, *keys: str, direction: str, timeout: float, count: int = ...
+    ) -> Awaitable[tuple[str, list[tuple[bytes, float]]] | None]: ...
+    def zrandmember(
+        self, key: str, count: int | None = ..., withscores: bool = ...
+    ) -> bytes | list[bytes] | list[tuple[bytes, float]] | None: ...
+    def azrandmember(
+        self, key: str, count: int | None = ..., withscores: bool = ...
+    ) -> Awaitable[bytes | list[bytes] | list[tuple[bytes, float]] | None]: ...
+    def zscan(
+        self,
+        key: str,
+        *,
+        cursor: int = ...,
+        match: str | None = ...,
+        count: int | None = ...,
+    ) -> tuple[int, list[tuple[bytes, float]]]: ...
+    def azscan(
+        self,
+        key: str,
+        *,
+        cursor: int = ...,
+        match: str | None = ...,
+        count: int | None = ...,
+    ) -> Awaitable[tuple[int, list[tuple[bytes, float]]]]: ...
+    def zunion(
+        self,
+        *,
+        keys: list[str],
+        weights: list[float] | None = ...,
+        aggregate: str | None = ...,
+        withscores: bool = ...,
+    ) -> list[bytes] | list[tuple[bytes, float]]: ...
+    def azunion(
+        self,
+        *,
+        keys: list[str],
+        weights: list[float] | None = ...,
+        aggregate: str | None = ...,
+        withscores: bool = ...,
+    ) -> Awaitable[list[bytes] | list[tuple[bytes, float]]]: ...
+    def zinter(
+        self,
+        *,
+        keys: list[str],
+        weights: list[float] | None = ...,
+        aggregate: str | None = ...,
+        withscores: bool = ...,
+    ) -> list[bytes] | list[tuple[bytes, float]]: ...
+    def azinter(
+        self,
+        *,
+        keys: list[str],
+        weights: list[float] | None = ...,
+        aggregate: str | None = ...,
+        withscores: bool = ...,
+    ) -> Awaitable[list[bytes] | list[tuple[bytes, float]]]: ...
+    def zdiff(self, *, keys: list[str], withscores: bool = ...) -> list[bytes] | list[tuple[bytes, float]]: ...
+    def azdiff(
+        self, *, keys: list[str], withscores: bool = ...
+    ) -> Awaitable[list[bytes] | list[tuple[bytes, float]]]: ...
+    def zunionstore(
+        self,
+        destination: str,
+        *,
+        keys: list[str],
+        weights: list[float] | None = ...,
+        aggregate: str | None = ...,
+    ) -> int: ...
+    def azunionstore(
+        self,
+        destination: str,
+        *,
+        keys: list[str],
+        weights: list[float] | None = ...,
+        aggregate: str | None = ...,
+    ) -> Awaitable[int]: ...
+    def zinterstore(
+        self,
+        destination: str,
+        *,
+        keys: list[str],
+        weights: list[float] | None = ...,
+        aggregate: str | None = ...,
+    ) -> int: ...
+    def azinterstore(
+        self,
+        destination: str,
+        *,
+        keys: list[str],
+        weights: list[float] | None = ...,
+        aggregate: str | None = ...,
+    ) -> Awaitable[int]: ...
+    def zdiffstore(self, destination: str, *, keys: list[str]) -> int: ...
+    def azdiffstore(self, destination: str, *, keys: list[str]) -> Awaitable[int]: ...
+    def zintercard(self, *, keys: list[str], limit: int | None = ...) -> int: ...
+    def azintercard(self, *, keys: list[str], limit: int | None = ...) -> Awaitable[int]: ...
+
     # --- Test-only -----------------------------------------------------
     def _blocking_initialised(self) -> bool: ...
 
