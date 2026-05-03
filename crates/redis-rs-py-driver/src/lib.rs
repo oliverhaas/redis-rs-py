@@ -10,6 +10,7 @@ mod async_bridge;
 mod connection;
 mod driver;
 mod errors;
+pub(crate) mod exceptions;
 mod raw_result;
 mod runtime;
 mod test_helpers;
@@ -19,6 +20,7 @@ use pyo3::prelude::*;
 #[pymodule]
 fn _driver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    exceptions::register(m.py(), m)?;
     m.add_class::<async_bridge::RedisRsAwaitable>()?;
     m.add_class::<driver::RedisRsDriver>()?;
 
