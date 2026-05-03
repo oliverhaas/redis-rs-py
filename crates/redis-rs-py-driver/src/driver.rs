@@ -13,7 +13,7 @@
 // (get/set/delete/ping).
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyList, PySet, PyString, PyTuple};
 use redis::AsyncCommands;
 
 use crate::async_bridge::RawResult;
@@ -107,6 +107,15 @@ pub(crate) fn py_bytes_pairs(py: Python<'_>, v: Vec<(Vec<u8>, Vec<u8>)>) -> PyRe
 #[allow(dead_code)]
 pub(crate) fn py_tuple2(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     Ok(PyTuple::new(py, [a, b])?.into_any().unbind())
+}
+
+#[allow(dead_code)]
+pub(crate) fn py_set_of_bytes(py: Python<'_>, v: Vec<Vec<u8>>) -> PyResult<Py<PyAny>> {
+    let s = PySet::empty(py)?;
+    for b in v {
+        s.add(PyBytes::new(py, &b))?;
+    }
+    Ok(s.into_any().unbind())
 }
 
 // =========================================================================

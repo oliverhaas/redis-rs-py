@@ -8,4 +8,5 @@
 
 pub mod hashes;
 pub mod lists;
+pub mod sets;
 pub mod strings;

@@ -9,7 +9,7 @@
 // the second region of this file and is also a verbatim port.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyList, PySet, PyString, PyTuple};
 
 pub enum RawResult {
     Nil,
@@ -35,6 +35,15 @@ pub enum RawResult {
         cursor: u64,
         value: redis::Value,
         novalues: bool,
+    },
+    /// Python `set[bytes]` — used by SMEMBERS, SINTER, SUNION, SDIFF, SPOP(count), SRANDMEMBER(count>=0).
+    SetOfBytes(Vec<Vec<u8>>),
+    /// Python `list[bool]` — used by SMISMEMBER.
+    BoolList(Vec<bool>),
+    /// `(cursor: int, set[bytes])` — used by SSCAN.
+    SScan {
+        cursor: u64,
+        members: Vec<Vec<u8>>,
     },
     Value(redis::Value),
     Error(crate::exceptions::ExceptionClass, String),
@@ -191,6 +200,30 @@ impl RawResult {
                 value,
                 novalues,
             } => crate::commands::hashes::render_hscan(py, cursor, value, novalues),
+            RawResult::SetOfBytes(items) => {
+                let py_set = PySet::empty(py)?;
+                for b in items {
+                    py_set.add(PyBytes::new(py, &b))?;
+                }
+                Ok(py_set.into_any().unbind())
+            }
+            RawResult::BoolList(items) => {
+                let py_items: Vec<Py<PyAny>> = items
+                    .into_iter()
+                    .map(|b| b.into_pyobject(py).unwrap().to_owned().into_any().unbind())
+                    .collect();
+                Ok(PyList::new(py, py_items)?.into_any().unbind())
+            }
+            RawResult::SScan { cursor, members } => {
+                let cursor_py = cursor.into_pyobject(py)?.into_any().unbind();
+                let py_set = PySet::empty(py)?;
+                for b in members {
+                    py_set.add(PyBytes::new(py, &b))?;
+                }
+                Ok(PyTuple::new(py, [cursor_py, py_set.into_any().unbind()])?
+                    .into_any()
+                    .unbind())
+            }
             RawResult::Value(v) => redis_value_to_py(py, v),
             RawResult::Error(class, e) => Err(class.into_py_err(py, e)),
         }

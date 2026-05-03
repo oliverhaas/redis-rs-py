@@ -152,3 +152,9 @@ impl From<redis::Value> for RawResult {
         RawResult::Value(v)
     }
 }
+
+impl From<Vec<bool>> for RawResult {
+    fn from(v: Vec<bool>) -> Self {
+        RawResult::BoolList(v)
+    }
+}

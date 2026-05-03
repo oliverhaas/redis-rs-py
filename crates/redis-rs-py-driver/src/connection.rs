@@ -1122,6 +1122,195 @@ impl ValkeyConnInner {
         }
         crate::dispatch_cmd!(self, cmd)
     }
+
+    // =========================================================================
+    // Set commands (Plan 06)
+    // =========================================================================
+
+    pub async fn sadd(&mut self, key: &str, members: &[Vec<u8>]) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("SADD");
+        cmd.arg(key);
+        for m in members {
+            cmd.arg(m.as_slice());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn srem(&mut self, key: &str, members: &[Vec<u8>]) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("SREM");
+        cmd.arg(key);
+        for m in members {
+            cmd.arg(m.as_slice());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn smembers(&mut self, key: &str) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("SMEMBERS");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn scard(&mut self, key: &str) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("SCARD");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn sismember(&mut self, key: &str, member: &[u8]) -> redis::RedisResult<bool> {
+        let mut cmd = redis::cmd("SISMEMBER");
+        cmd.arg(key).arg(member);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn smismember(
+        &mut self,
+        key: &str,
+        members: &[Vec<u8>],
+    ) -> redis::RedisResult<Vec<bool>> {
+        let mut cmd = redis::cmd("SMISMEMBER");
+        cmd.arg(key);
+        for m in members {
+            cmd.arg(m.as_slice());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn spop_one(&mut self, key: &str) -> redis::RedisResult<Option<Vec<u8>>> {
+        let mut cmd = redis::cmd("SPOP");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn spop_count(&mut self, key: &str, count: i64) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("SPOP");
+        cmd.arg(key).arg(count);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn srandmember_one(&mut self, key: &str) -> redis::RedisResult<Option<Vec<u8>>> {
+        let mut cmd = redis::cmd("SRANDMEMBER");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn srandmember_count(
+        &mut self,
+        key: &str,
+        count: i64,
+    ) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("SRANDMEMBER");
+        cmd.arg(key).arg(count);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn sinter(&mut self, keys: &[String]) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("SINTER");
+        for k in keys {
+            cmd.arg(k.as_str());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn sunion(&mut self, keys: &[String]) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("SUNION");
+        for k in keys {
+            cmd.arg(k.as_str());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn sdiff(&mut self, keys: &[String]) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("SDIFF");
+        for k in keys {
+            cmd.arg(k.as_str());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn sinterstore(
+        &mut self,
+        destination: &str,
+        keys: &[String],
+    ) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("SINTERSTORE");
+        cmd.arg(destination);
+        for k in keys {
+            cmd.arg(k.as_str());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn sunionstore(
+        &mut self,
+        destination: &str,
+        keys: &[String],
+    ) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("SUNIONSTORE");
+        cmd.arg(destination);
+        for k in keys {
+            cmd.arg(k.as_str());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn sdiffstore(
+        &mut self,
+        destination: &str,
+        keys: &[String],
+    ) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("SDIFFSTORE");
+        cmd.arg(destination);
+        for k in keys {
+            cmd.arg(k.as_str());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn sintercard(
+        &mut self,
+        keys: &[String],
+        limit: Option<i64>,
+    ) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("SINTERCARD");
+        cmd.arg(keys.len());
+        for k in keys {
+            cmd.arg(k.as_str());
+        }
+        if let Some(lim) = limit {
+            cmd.arg("LIMIT").arg(lim);
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn smove(
+        &mut self,
+        source: &str,
+        destination: &str,
+        member: &[u8],
+    ) -> redis::RedisResult<bool> {
+        let mut cmd = redis::cmd("SMOVE");
+        cmd.arg(source).arg(destination).arg(member);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn sscan_raw(
+        &mut self,
+        key: &str,
+        cursor: u64,
+        match_pattern: Option<&str>,
+        count: Option<i64>,
+    ) -> redis::RedisResult<redis::Value> {
+        let mut cmd = redis::cmd("SSCAN");
+        cmd.arg(key).arg(cursor);
+        if let Some(p) = match_pattern {
+            cmd.arg("MATCH").arg(p);
+        }
+        if let Some(c) = count {
+            cmd.arg("COUNT").arg(c);
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
 }
 
 async fn bpop_inner(
