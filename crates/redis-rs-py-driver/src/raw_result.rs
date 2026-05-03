@@ -159,6 +159,12 @@ impl From<Vec<bool>> for RawResult {
     }
 }
 
+impl From<Option<(String, String)>> for RawResult {
+    fn from(v: Option<(String, String)>) -> Self {
+        RawResult::OptStrPair(v)
+    }
+}
+
 // Stream From<T> impls (Plan 08)
 impl From<Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>> for RawResult {
     fn from(v: Vec<(Vec<u8>, Vec<(Vec<u8>, Vec<u8>)>)>) -> Self {

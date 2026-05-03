@@ -7,6 +7,8 @@ hierarchy are exposed.
 
 from redis_rs_py import exceptions
 from redis_rs_py._driver import RedisRsAwaitable, RedisRsDriver, __version__
+from redis_rs_py._scan_iter import scan_iter as _scan_iter
+from redis_rs_py.asyncio._scan_iter import scan_iter_async as _scan_iter_async
 from redis_rs_py.exceptions import (
     AskError,
     AuthenticationError,
@@ -36,6 +38,13 @@ from redis_rs_py.exceptions import (
     TryAgainError,
     WatchError,
 )
+
+# Attach the Python-side scan_iter helpers to the Rust pyclass. Done
+# here so users get `driver.scan_iter(...)` and `driver.scan_iter_async(...)`
+# without an extra import step. (See _scan_iter.py for why these can't
+# be Rust pyclass methods.)
+RedisRsDriver.scan_iter = _scan_iter  # type: ignore[attr-defined]  # ty: ignore[invalid-assignment]
+RedisRsDriver.scan_iter_async = _scan_iter_async  # type: ignore[attr-defined]  # ty: ignore[invalid-assignment]
 
 __all__ = [
     "AskError",

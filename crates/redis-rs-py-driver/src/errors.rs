@@ -63,6 +63,11 @@ pub fn classify_error(e: &redis::RedisError) -> ExceptionClass {
         if code_upper.starts_with("MODULE") {
             return ExceptionClass::ModuleError;
         }
+        // NOTBUSY — raised by SCRIPT KILL / FUNCTION KILL when nothing is running.
+        // Arrives as an Extension error, so it would otherwise fall to RedisError.
+        if code_upper == "NOTBUSY" {
+            return ExceptionClass::ResponseError;
+        }
     }
 
     // Layer 4: any remaining server-side error → ResponseError. `Extension` covers the

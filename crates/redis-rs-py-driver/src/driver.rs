@@ -125,7 +125,7 @@ pub(crate) fn py_set_of_bytes(py: Python<'_>, v: Vec<Vec<u8>>) -> PyResult<Py<Py
 #[pyclass(module = "redis_rs_py._driver")]
 pub struct RedisRsDriver {
     pub(crate) connection: ValkeyConn,
-    url: String,
+    pub(crate) url: String,
 }
 
 #[pymethods]
@@ -241,22 +241,50 @@ impl RedisRsDriver {
 
     // --- ping / aping ------------------------------------------------------
 
-    fn ping(&self, py: Python<'_>) -> PyResult<bool> {
-        let r: redis::RedisResult<String> = sync_op!(py, self, conn, async {
-            dispatch_cmd!(&mut *conn, redis::cmd("PING"))
-        });
-        match r {
-            Ok(s) => Ok(s == "PONG"),
-            Err(e) => Err(to_py_err(e)),
+    #[pyo3(signature = (*, message=None))]
+    fn ping(&self, py: Python<'_>, message: Option<String>) -> PyResult<Py<PyAny>> {
+        match message {
+            None => {
+                let r: redis::RedisResult<String> = sync_op!(py, self, conn, async {
+                    dispatch_cmd!(&mut *conn, redis::cmd("PING"))
+                });
+                match r {
+                    Ok(s) => py_bool(py, s == "PONG"),
+                    Err(e) => Err(to_py_err(e)),
+                }
+            }
+            Some(msg) => {
+                let mut cmd = redis::cmd("PING");
+                cmd.arg(msg);
+                let r: redis::RedisResult<Vec<u8>> =
+                    sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
+                let bytes = r.map_err(to_py_err)?;
+                Ok(PyBytes::new(py, &bytes).into_any().unbind())
+            }
         }
     }
 
-    fn aping(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (*, message=None))]
+    fn aping(&self, py: Python<'_>, message: Option<String>) -> PyResult<Py<PyAny>> {
         async_op!(self, py, conn, async {
-            let r: redis::RedisResult<String> = dispatch_cmd!(&mut *conn, redis::cmd("PING"));
-            match r {
-                Ok(s) => RawResult::Bool(s == "PONG"),
-                Err(e) => crate::errors::classify(e),
+            match message {
+                None => {
+                    let r: redis::RedisResult<String> =
+                        dispatch_cmd!(&mut *conn, redis::cmd("PING"));
+                    match r {
+                        Ok(s) => RawResult::Bool(s == "PONG"),
+                        Err(e) => crate::errors::classify(e),
+                    }
+                }
+                Some(msg) => {
+                    let mut cmd = redis::cmd("PING");
+                    cmd.arg(&msg);
+                    let r: redis::RedisResult<Vec<u8>> = dispatch_cmd!(&mut *conn, cmd);
+                    match r {
+                        Ok(b) => RawResult::OptBytes(Some(b)),
+                        Err(e) => crate::errors::classify(e),
+                    }
+                }
             }
         })
     }

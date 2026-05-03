@@ -6,8 +6,10 @@
 //
 // New families append a `pub mod <family>;` line below.
 
+pub mod admin;
 pub mod hashes;
 pub mod lists;
+pub mod scripts;
 pub mod sets;
 pub mod streams;
 pub mod strings;

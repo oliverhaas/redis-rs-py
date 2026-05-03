@@ -89,6 +89,11 @@ pub enum RawResult {
     StreamInfoStream(Vec<(Vec<u8>, redis::Value)>),
     StreamInfoGroups(Vec<Vec<(Vec<u8>, redis::Value)>>),
     StreamInfoConsumers(Vec<Vec<(Vec<u8>, redis::Value)>>),
+    // Admin variants (Plan 09)
+    /// `(seconds, microseconds)` string pair from TIME.
+    OptStrPair(Option<(String, String)>),
+    /// `list[dict[bytes, bytes]]` — used by CLIENT LIST.
+    BytesPairsList(Vec<Vec<(Vec<u8>, Vec<u8>)>>),
 }
 
 fn redis_value_to_py(py: Python<'_>, v: redis::Value) -> PyResult<Py<PyAny>> {
@@ -312,6 +317,23 @@ impl RawResult {
                     .collect::<PyResult<_>>()?;
                 let list_py = PyList::new(py, py_items)?.into_any().unbind();
                 Ok(PyTuple::new(py, [cursor_py, list_py])?.into_any().unbind())
+            }
+            RawResult::OptStrPair(None) => Ok(py.None()),
+            RawResult::OptStrPair(Some((a, b))) => {
+                let a_py = PyString::new(py, &a).into_any().unbind();
+                let b_py = PyString::new(py, &b).into_any().unbind();
+                Ok(PyTuple::new(py, [a_py, b_py])?.into_any().unbind())
+            }
+            RawResult::BytesPairsList(rows) => {
+                let mut items: Vec<Py<PyAny>> = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let dict = PyDict::new(py);
+                    for (k, v) in row {
+                        dict.set_item(PyBytes::new(py, &k), PyBytes::new(py, &v))?;
+                    }
+                    items.push(dict.into_any().unbind());
+                }
+                Ok(PyList::new(py, items)?.into_any().unbind())
             }
             RawResult::Value(v) => redis_value_to_py(py, v),
             RawResult::Error(class, e) => Err(class.into_py_err(py, e)),
