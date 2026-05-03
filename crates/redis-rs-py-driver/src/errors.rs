@@ -155,10 +155,12 @@ mod tests {
 
     #[test]
     fn classifies_auth_via_prefix() {
+        // The desc field becomes the prefix of the Display string;
+        // "wrongpass" uppercases to "WRONGPASS" which triggers the sniff.
         let e = make_err(
             redis::ErrorKind::Server(redis::ServerErrorKind::ResponseError),
-            "auth",
-            "WRONGPASS invalid username-password pair",
+            "wrongpass",
+            "invalid username-password pair",
         );
         assert!(matches!(
             classify_error(&e),
