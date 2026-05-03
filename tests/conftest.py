@@ -20,6 +20,13 @@ if TYPE_CHECKING:
 
 VALKEY_IMAGE = os.environ.get("REDIS_RS_PY_VALKEY_IMAGE", "valkey/valkey:8.0")
 
+# Module-global pin so spawned containers survive past their fixture's teardown.
+# Under xdist, workers' session-scope teardowns run out-of-order; if the
+# container reference were held only in the fixture and dropped on first
+# worker's session end, other workers still using the URL would fail with
+# ConnectionError. Keeping a module-level pin lets Ryuk reap on process exit.
+_PINNED_CONTAINERS: list[DockerContainer] = []
+
 
 def _spawn_valkey() -> tuple[DockerContainer, str]:
     container = DockerContainer(VALKEY_IMAGE).with_exposed_ports(6379)
@@ -46,18 +53,14 @@ def valkey_url(tmp_path_factory: pytest.TempPathFactory, worker_id: str) -> Iter
 
     with FileLock(str(lockfile)):
         if urlfile.exists():
-            container = None
             url = urlfile.read_text().strip()
         else:
             container, url = _spawn_valkey()
             urlfile.write_text(url)
+            # Pin the container at module level — see _PINNED_CONTAINERS comment.
+            _PINNED_CONTAINERS.append(container)
 
-    try:
-        yield url
-    finally:
-        if container is not None:
-            container.stop()
-            urlfile.unlink(missing_ok=True)
+    yield url
 
 
 @pytest.fixture
