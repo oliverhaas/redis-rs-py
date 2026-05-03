@@ -450,6 +450,9 @@ async def test_admin_object_memory(r: Redis) -> None:
     assert await r.memory_usage("k") > 0
 
 
+# BGSAVE / BGREWRITEAOF are server-global — only one can run at a time, so
+# parallel workers would race each other. Pin to a single worker.
+@pytest.mark.xdist_group(name="redis_global_state")
 @pytest.mark.asyncio
 async def test_admin_basic(r: Redis) -> None:
     assert await r.echo(b"hi") == b"hi"
