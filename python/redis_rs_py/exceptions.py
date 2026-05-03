@@ -12,7 +12,7 @@ import redis_rs_py._driver as _drv
 # sys.modules under its dotted name. We register it here so that
 # `import redis_rs_py._driver.exceptions` works as expected.
 _exc_mod = _drv.exceptions
-sys.modules.setdefault("redis_rs_py._driver.exceptions", _exc_mod)
+sys.modules.setdefault("redis_rs_py._driver.exceptions", _exc_mod)  # type: ignore[arg-type]  # ty: ignore[no-matching-overload]
 
 AskError = _exc_mod.AskError
 AuthenticationError = _exc_mod.AuthenticationError
@@ -21,7 +21,7 @@ BusyLoadingError = _exc_mod.BusyLoadingError
 ClusterCrossSlotError = _exc_mod.ClusterCrossSlotError
 ClusterDownError = _exc_mod.ClusterDownError
 ClusterError = _exc_mod.ClusterError
-ConnectionError = _exc_mod.ConnectionError  # noqa: A001
+ConnectionError = _exc_mod.ConnectionError
 DataError = _exc_mod.DataError
 ExecAbortError = _exc_mod.ExecAbortError
 InvalidResponse = _exc_mod.InvalidResponse
@@ -38,7 +38,7 @@ ReadOnlyError = _exc_mod.ReadOnlyError
 RedisError = _exc_mod.RedisError
 ResponseError = _exc_mod.ResponseError
 SlaveError = _exc_mod.SlaveError
-TimeoutError = _exc_mod.TimeoutError  # noqa: A001
+TimeoutError = _exc_mod.TimeoutError
 TryAgainError = _exc_mod.TryAgainError
 WatchError = _exc_mod.WatchError
 

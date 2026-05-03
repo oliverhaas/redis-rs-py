@@ -66,8 +66,12 @@ fix = true
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
+  "A001",    # Exception names like ConnectionError intentionally shadow builtins (redis-py API)
   "A002",    # min/max param names match Redis API (ZCOUNT key min max, etc.)
   "A003",    # Method names like `set`/`type` mirror the Redis API
+  "A004",    # Imports like ConnectionError/TimeoutError intentionally shadow builtins (redis-py API)
+  "N801",    # exceptions submodule stub uses lowercase class name intentionally
+  "N818",    # InvalidResponse follows redis-py naming; does not need Error suffix
   "ANN401",  # Any is correct for arbitrary Redis values
   "COM812",  # Conflicts with ruff-format
   "D",       # Docstrings — add incrementally
