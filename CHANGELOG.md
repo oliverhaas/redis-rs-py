@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Full `redis.exceptions`-compatible hierarchy (`RedisError`, `ConnectionError`, `TimeoutError`, `BusyLoadingError`, `AuthenticationError`, `ResponseError`, `NoScriptError`, `ExecAbortError`, `ReadOnlyError`, `OutOfMemoryError`, `NoPermissionError`, `ModuleError`, `LockError`, `LockNotOwnedError`, `WatchError`, `PubSubError`, `MasterDownError`, `SlaveError`, `ClusterError`, `ClusterDownError`, `ClusterCrossSlotError`, `MovedError`, `AskError`, `TryAgainError`, `DataError`, `InvalidResponse`, `AuthenticationWrongNumberOfArgsError`).
+- Boundary classifier `errors::classify_error` mapping `redis-rs` errors → exception class via `ErrorKind` + `ServerErrorKind` + message-prefix sniffing.
+- Top-level re-exports: `from redis_rs_py import RedisError` matches the redis-py user idiom.
 - Tokio runtime singleton with PID-checked fork-safe rebuild (lifted from `django-cachex-redis-rs` / `django-vcache`).
 - `RedisRsAwaitable` — custom asyncio bridge with 5-poll busy-yield + callback-mode fallback, full done-callback (with `contextvars.Context` support) + cancellation-wakes-pending-callbacks support.
 - `RawResult` typed boundary with 20 variants and a recursive `redis::Value` → Python converter.
