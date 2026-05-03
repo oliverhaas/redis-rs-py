@@ -790,7 +790,7 @@ impl Redis {
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         let entries = flatten_xrange_reply(r.map_err(to_py_err)?);
-        RawResult::StreamEntries(entries).into_py(py)
+        self.maybe_decode(py, RawResult::StreamEntries(entries).into_py(py)?)
     }
 
     // ----- XREVRANGE -----
@@ -808,7 +808,7 @@ impl Redis {
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         let entries = flatten_xrange_reply(r.map_err(to_py_err)?);
-        RawResult::StreamEntries(entries).into_py(py)
+        self.maybe_decode(py, RawResult::StreamEntries(entries).into_py(py)?)
     }
 
     // ----- XREAD -----
@@ -835,7 +835,7 @@ impl Redis {
             })
         });
         let entries = flatten_xread_reply(r.map_err(to_py_err)?);
-        RawResult::StreamReadEntries(entries).into_py(py)
+        self.maybe_decode(py, RawResult::StreamReadEntries(entries).into_py(py)?)
     }
 
     // ----- XREADGROUP -----
@@ -866,7 +866,7 @@ impl Redis {
             })
         });
         let entries = flatten_xread_reply(r.map_err(to_py_err)?);
-        RawResult::StreamReadEntries(entries).into_py(py)
+        self.maybe_decode(py, RawResult::StreamReadEntries(entries).into_py(py)?)
     }
 
     // ----- XGROUP CREATE -----
@@ -951,7 +951,7 @@ impl Redis {
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         let pairs = flatten_xinfo_stream(r.map_err(to_py_err)?);
-        RawResult::StreamInfoStream(pairs).into_py(py)
+        self.maybe_decode(py, RawResult::StreamInfoStream(pairs).into_py(py)?)
     }
 
     // ----- XINFO GROUPS -----
@@ -960,7 +960,10 @@ impl Redis {
         let cmd = cmd_xinfo_groups(key);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::StreamInfoGroups(flatten_xinfo_list(r.map_err(to_py_err)?)).into_py(py)
+        self.maybe_decode(
+            py,
+            RawResult::StreamInfoGroups(flatten_xinfo_list(r.map_err(to_py_err)?)).into_py(py)?,
+        )
     }
 
     // ----- XINFO CONSUMERS -----
@@ -969,7 +972,11 @@ impl Redis {
         let cmd = cmd_xinfo_consumers(key, group);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::StreamInfoConsumers(flatten_xinfo_list(r.map_err(to_py_err)?)).into_py(py)
+        self.maybe_decode(
+            py,
+            RawResult::StreamInfoConsumers(flatten_xinfo_list(r.map_err(to_py_err)?))
+                .into_py(py)?,
+        )
     }
 
     // ----- XTRIM -----
@@ -1026,9 +1033,15 @@ impl Redis {
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         let value = r.map_err(to_py_err)?;
         if is_range {
-            RawResult::StreamPendingRange(flatten_xpending_range(value)).into_py(py)
+            self.maybe_decode(
+                py,
+                RawResult::StreamPendingRange(flatten_xpending_range(value)).into_py(py)?,
+            )
         } else {
-            RawResult::StreamPendingSummary(flatten_xpending_summary(value)).into_py(py)
+            self.maybe_decode(
+                py,
+                RawResult::StreamPendingSummary(flatten_xpending_summary(value)).into_py(py)?,
+            )
         }
     }
 
@@ -1081,10 +1094,10 @@ impl Redis {
                 }
                 _ => Vec::new(),
             };
-            RawResult::StreamClaimJustIds(ids).into_py(py)
+            self.maybe_decode(py, RawResult::StreamClaimJustIds(ids).into_py(py)?)
         } else {
             let entries = flatten_xrange_reply(value);
-            RawResult::StreamClaim(entries).into_py(py)
+            self.maybe_decode(py, RawResult::StreamClaim(entries).into_py(py)?)
         }
     }
 
@@ -1128,10 +1141,16 @@ impl Redis {
                 }
                 _ => Vec::new(),
             };
-            RawResult::StreamAutoclaimJustIds((next_id, ids, deleted)).into_py(py)
+            self.maybe_decode(
+                py,
+                RawResult::StreamAutoclaimJustIds((next_id, ids, deleted)).into_py(py)?,
+            )
         } else {
             let entries = flatten_xrange_reply(middle);
-            RawResult::StreamAutoclaim((next_id, entries, deleted)).into_py(py)
+            self.maybe_decode(
+                py,
+                RawResult::StreamAutoclaim((next_id, entries, deleted)).into_py(py)?,
+            )
         }
     }
 

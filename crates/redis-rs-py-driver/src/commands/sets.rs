@@ -89,7 +89,7 @@ impl Redis {
     fn smembers(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             crate::sync_op!(py, self, conn, async { conn.smembers(key).await });
-        py_set_of_bytes(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, py_set_of_bytes(py, r.map_err(to_py_err)?)?)
     }
 
     #[pyo3(signature = (key))]
@@ -136,12 +136,12 @@ impl Redis {
             None => {
                 let r: redis::RedisResult<Option<Vec<u8>>> =
                     crate::sync_op!(py, self, conn, async { conn.spop_one(key).await });
-                Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+                self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
             }
             Some(n) => {
                 let r: redis::RedisResult<Vec<Vec<u8>>> =
                     crate::sync_op!(py, self, conn, async { conn.spop_count(key, n).await });
-                py_set_of_bytes(py, r.map_err(to_py_err)?)
+                self.maybe_decode(py, py_set_of_bytes(py, r.map_err(to_py_err)?)?)
             }
         }
     }
@@ -152,7 +152,7 @@ impl Redis {
             None => {
                 let r: redis::RedisResult<Option<Vec<u8>>> =
                     crate::sync_op!(py, self, conn, async { conn.srandmember_one(key).await });
-                Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+                self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
             }
             Some(n) => {
                 let r: redis::RedisResult<Vec<Vec<u8>>> = crate::sync_op!(py, self, conn, async {
@@ -165,10 +165,10 @@ impl Redis {
                         .iter()
                         .map(|b| PyBytes::new(py, b).into_any().unbind())
                         .collect();
-                    Ok(PyList::new(py, py_items)?.into_any().unbind())
+                    self.maybe_decode(py, PyList::new(py, py_items)?.into_any().unbind())
                 } else {
                     // Non-negative → distinct → set.
-                    py_set_of_bytes(py, items)
+                    self.maybe_decode(py, py_set_of_bytes(py, items)?)
                 }
             }
         }
@@ -182,21 +182,21 @@ impl Redis {
     fn sinter(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             crate::sync_op!(py, self, conn, async { conn.sinter(&keys).await });
-        py_set_of_bytes(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, py_set_of_bytes(py, r.map_err(to_py_err)?)?)
     }
 
     #[pyo3(signature = (*keys))]
     fn sunion(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             crate::sync_op!(py, self, conn, async { conn.sunion(&keys).await });
-        py_set_of_bytes(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, py_set_of_bytes(py, r.map_err(to_py_err)?)?)
     }
 
     #[pyo3(signature = (*keys))]
     fn sdiff(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             crate::sync_op!(py, self, conn, async { conn.sdiff(&keys).await });
-        py_set_of_bytes(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, py_set_of_bytes(py, r.map_err(to_py_err)?)?)
     }
 
     #[pyo3(signature = (destination, *keys))]
@@ -289,7 +289,10 @@ impl Redis {
         let (next_cursor, members) = parse_sscan_reply(value)?;
         let cursor_py = next_cursor.into_pyobject(py)?.into_any().unbind();
         let py_set = py_set_of_bytes(py, members)?;
-        Ok(PyTuple::new(py, [cursor_py, py_set])?.into_any().unbind())
+        self.maybe_decode(
+            py,
+            PyTuple::new(py, [cursor_py, py_set])?.into_any().unbind(),
+        )
     }
 }
 

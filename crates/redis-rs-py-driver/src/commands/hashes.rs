@@ -246,7 +246,7 @@ impl Redis {
     fn hget(&self, py: Python<'_>, key: &str, field: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Option<Vec<u8>>> =
             sync_op!(py, self, conn, async { conn.hget(key, field).await });
-        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+        self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
     }
 
     #[pyo3(signature = (key, *items, mapping=None))]
@@ -276,7 +276,7 @@ impl Redis {
     fn hgetall(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Vec<(Vec<u8>, Vec<u8>)>> =
             sync_op!(py, self, conn, async { conn.hgetall(key).await });
-        py_bytes_pairs(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, py_bytes_pairs(py, r.map_err(to_py_err)?)?)
     }
 
     #[pyo3(signature = (key, *fields))]
@@ -315,7 +315,7 @@ impl Redis {
                 None => py.None(),
             })
             .collect();
-        Ok(PyList::new(py, py_items)?.into_any().unbind())
+        self.maybe_decode(py, PyList::new(py, py_items)?.into_any().unbind())
     }
 
     #[pyo3(signature = (key, mapping))]
@@ -355,14 +355,14 @@ impl Redis {
     fn hkeys(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             sync_op!(py, self, conn, async { conn.hkeys(key).await });
-        py_bytes_list(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
     }
 
     #[pyo3(signature = (key))]
     fn hvals(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             sync_op!(py, self, conn, async { conn.hvals(key).await });
-        py_bytes_list(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
     }
 
     #[pyo3(signature = (key, count=None, withvalues=false))]
@@ -377,7 +377,7 @@ impl Redis {
             conn.hrandfield_raw(key, count, withvalues).await
         });
         let value = r.map_err(to_py_err)?;
-        render_hrandfield(py, value, count, withvalues)
+        self.maybe_decode(py, render_hrandfield(py, value, count, withvalues)?)
     }
 
     #[pyo3(signature = (key, field, amount))]
@@ -412,7 +412,7 @@ impl Redis {
         });
         let value = r.map_err(to_py_err)?;
         let (cur, payload) = split_scan_reply(value)?;
-        render_hscan(py, cur, payload, novalues)
+        self.maybe_decode(py, render_hscan(py, cur, payload, novalues)?)
     }
 
     #[pyo3(signature = (key, fields, time, *, nx=false, xx=false, gt=false, lt=false))]

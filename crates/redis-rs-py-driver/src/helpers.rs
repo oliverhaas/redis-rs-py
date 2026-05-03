@@ -15,6 +15,8 @@ use pyo3::types::{PyBytes, PyDict, PyList, PySet, PyString, PyTuple};
 /// Spawn an async block on the runtime, return a RedisRsAwaitable to Python.
 /// `$body` must be an `async { ... }` block that evaluates to a `RawResult`.
 /// Raises `ValueError("closed")` immediately if `self.closed` is true.
+/// If `self.decode` is Some, the returned awaitable is wrapped in a Python
+/// coroutine that decodes the result after awaiting.
 #[macro_export]
 macro_rules! async_op {
     ($self:expr, $py:expr, $conn:ident, $body:expr) => {{
@@ -28,7 +30,8 @@ macro_rules! async_op {
             let result: $crate::async_bridge::RawResult = $body.await;
             let _ = tx.send(result);
         });
-        Ok(awaitable.into_pyobject($py)?.into_any().unbind())
+        let aw_py = awaitable.into_pyobject($py)?.into_any().unbind();
+        $self.maybe_wrap($py, aw_py)
     }};
 }
 

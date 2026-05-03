@@ -121,12 +121,12 @@ impl Redis {
             None => {
                 let r: redis::RedisResult<Option<Vec<u8>>> =
                     crate::sync_op!(py, self, conn, async { conn.lpop_one(name).await });
-                Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+                self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
             }
             Some(c) => {
                 let r: redis::RedisResult<Option<Vec<Vec<u8>>>> =
                     crate::sync_op!(py, self, conn, async { conn.lpop_count(name, c).await });
-                opt_bytes_list_to_py(py, r.map_err(to_py_err)?)
+                self.maybe_decode(py, opt_bytes_list_to_py(py, r.map_err(to_py_err)?)?)
             }
         }
     }
@@ -139,12 +139,12 @@ impl Redis {
             None => {
                 let r: redis::RedisResult<Option<Vec<u8>>> =
                     crate::sync_op!(py, self, conn, async { conn.rpop_one(name).await });
-                Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+                self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
             }
             Some(c) => {
                 let r: redis::RedisResult<Option<Vec<Vec<u8>>>> =
                     crate::sync_op!(py, self, conn, async { conn.rpop_count(name, c).await });
-                opt_bytes_list_to_py(py, r.map_err(to_py_err)?)
+                self.maybe_decode(py, opt_bytes_list_to_py(py, r.map_err(to_py_err)?)?)
             }
         }
     }
@@ -155,7 +155,7 @@ impl Redis {
         let r: redis::RedisResult<Vec<Vec<u8>>> = crate::sync_op!(py, self, conn, async {
             conn.lrange(name, start, end).await
         });
-        py_bytes_list(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
     }
 
     // ----- LLEN -------------------------------------------------------------
@@ -177,7 +177,7 @@ impl Redis {
         let r: redis::RedisResult<Option<Vec<u8>>> = crate::sync_op!(py, self, conn, async {
             conn.lmove(first_list, second_list, src, dest).await
         });
-        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+        self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
     }
 
     // ----- LPOS -------------------------------------------------------------
@@ -230,7 +230,7 @@ impl Redis {
     fn lindex(&self, py: Python<'_>, name: &str, index: i64) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Option<Vec<u8>>> =
             crate::sync_op!(py, self, conn, async { conn.lindex(name, index).await });
-        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+        self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
     }
 
     // ----- LSET -------------------------------------------------------------
@@ -289,7 +289,7 @@ impl Redis {
             crate::sync_op!(py, self, conn, async {
                 conn.lmpop(&keys, direction, count).await
             });
-        opt_key_and_bytes_list_to_py(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, opt_key_and_bytes_list_to_py(py, r.map_err(to_py_err)?)?)
     }
 
     // ----- BLPOP ------------------------------------------------------------
@@ -299,7 +299,7 @@ impl Redis {
         let r: redis::RedisResult<Option<(String, Vec<u8>)>> = py.detach(|| {
             crate::runtime::get_runtime().block_on(async { conn.blpop(&keys, timeout).await })
         });
-        opt_key_and_bytes_to_py(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, opt_key_and_bytes_to_py(py, r.map_err(to_py_err)?)?)
     }
 
     // ----- BRPOP ------------------------------------------------------------
@@ -309,7 +309,7 @@ impl Redis {
         let r: redis::RedisResult<Option<(String, Vec<u8>)>> = py.detach(|| {
             crate::runtime::get_runtime().block_on(async { conn.brpop(&keys, timeout).await })
         });
-        opt_key_and_bytes_to_py(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, opt_key_and_bytes_to_py(py, r.map_err(to_py_err)?)?)
     }
 
     // ----- BLMOVE -----------------------------------------------------------
@@ -334,7 +334,7 @@ impl Redis {
                     .await
             })
         });
-        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+        self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
     }
 
     // ----- BLMPOP -----------------------------------------------------------
@@ -355,7 +355,7 @@ impl Redis {
             crate::runtime::get_runtime()
                 .block_on(async { conn.blmpop(timeout, &keys, &direction_owned, count).await })
         });
-        opt_key_and_bytes_list_to_py(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, opt_key_and_bytes_list_to_py(py, r.map_err(to_py_err)?)?)
     }
 }
 
@@ -614,7 +614,8 @@ impl AsyncRedis {
             };
             let _ = tx.send(result);
         });
-        Ok(awaitable.into_pyobject(py)?.into_any().unbind())
+        let aw_py = awaitable.into_pyobject(py)?.into_any().unbind();
+        self.maybe_wrap(py, aw_py)
     }
 
     // ----- BRPOP ------------------------------------------------------------
@@ -630,7 +631,8 @@ impl AsyncRedis {
             };
             let _ = tx.send(result);
         });
-        Ok(awaitable.into_pyobject(py)?.into_any().unbind())
+        let aw_py = awaitable.into_pyobject(py)?.into_any().unbind();
+        self.maybe_wrap(py, aw_py)
     }
 
     // ----- BLMOVE -----------------------------------------------------------
@@ -661,7 +663,8 @@ impl AsyncRedis {
             };
             let _ = tx.send(result);
         });
-        Ok(awaitable.into_pyobject(py)?.into_any().unbind())
+        let aw_py = awaitable.into_pyobject(py)?.into_any().unbind();
+        self.maybe_wrap(py, aw_py)
     }
 
     // ----- BLMPOP -----------------------------------------------------------
@@ -690,6 +693,7 @@ impl AsyncRedis {
             };
             let _ = tx.send(result);
         });
-        Ok(awaitable.into_pyobject(py)?.into_any().unbind())
+        let aw_py = awaitable.into_pyobject(py)?.into_any().unbind();
+        self.maybe_wrap(py, aw_py)
     }
 }

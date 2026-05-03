@@ -68,6 +68,18 @@ pub struct Redis {
     pub(crate) connection: ValkeyConn,
     pub(crate) url: String,
     pub(crate) closed: bool,
+    pub(crate) decode: Option<crate::facade::decode::DecodeOpts>,
+}
+
+impl Redis {
+    /// If decode_responses is on, walk the value and return a decoded
+    /// fresh tree; otherwise return the original.
+    pub(crate) fn maybe_decode(&self, py: Python<'_>, value: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        match &self.decode {
+            Some(opts) => crate::facade::decode::decode_walk(py, value.bind(py), opts),
+            None => Ok(value),
+        }
+    }
 }
 
 // =========================================================================
@@ -463,11 +475,21 @@ pub(crate) fn build_connection(py: Python<'_>, cfg: &FacadeConfig) -> PyResult<R
         crate::runtime::get_runtime()
             .block_on(async { connect_standard(&url_clone, cache_opts, tls_opts).await })
     });
+    let decode = if cfg.decode_responses {
+        Some(crate::facade::decode::DecodeOpts::new(
+            cfg.encoding.clone(),
+            cfg.encoding_errors.clone(),
+        ))
+    } else {
+        None
+    };
+
     match conn {
         Ok(c) => Ok(Redis {
             connection: c,
             url: resp3_url,
             closed: false,
+            decode,
         }),
         Err(e) => Err(crate::errors::to_py_err(redis::RedisError::from((
             redis::ErrorKind::Io,

@@ -36,6 +36,8 @@ fn _driver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(test_helpers::_test_error, m)?)?;
     m.add_function(wrap_pyfunction!(test_helpers::_test_server_error, m)?)?;
     m.add_function(wrap_pyfunction!(facade::kwargs::py_reset_warn_state, m)?)?;
+    m.add_class::<facade::decode::DecoderClosure>()?;
+    m.add_function(wrap_pyfunction!(facade::decode::py_decode_walk, m)?)?;
 
     // asyncio submodule — registered both as a PyO3 submodule and into
     // sys.modules so `import redis_rs_py._driver.asyncio` resolves.

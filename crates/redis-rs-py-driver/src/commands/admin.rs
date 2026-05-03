@@ -539,9 +539,10 @@ impl Redis {
             .map(|k| PyBytes::new(py, &k).into_any().unbind())
             .collect();
         let keys_list = PyList::new(py, keys_py)?.into_any().unbind();
-        Ok(PyTuple::new(py, [cursor_py, keys_list])?
+        let result = PyTuple::new(py, [cursor_py, keys_list])?
             .into_any()
-            .unbind())
+            .unbind();
+        self.maybe_decode(py, result)
     }
 
     fn keys(&self, py: Python<'_>, pattern: &str) -> PyResult<Py<PyAny>> {
@@ -549,14 +550,14 @@ impl Redis {
         let cmd = cmd_keys(pattern);
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::BytesList(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::BytesList(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     fn randomkey(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let cmd = cmd_randomkey();
         let r: redis::RedisResult<Option<Vec<u8>>> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::OptBytes(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::OptBytes(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     // --- DBSIZE / FLUSHDB / FLUSHALL / SELECT ---
@@ -610,7 +611,7 @@ impl Redis {
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         let bytes = value_to_bytes(r.map_err(to_py_err)?);
-        Ok(PyBytes::new(py, &bytes).into_any().unbind())
+        self.maybe_decode(py, PyBytes::new(py, &bytes).into_any().unbind())
     }
 
     // --- CONFIG GET / SET / RESETSTAT / REWRITE ---
@@ -619,7 +620,10 @@ impl Redis {
         let cmd = cmd_config_get(parameter);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::BytesPairs(parse_config_get_reply(r.map_err(to_py_err)?)).into_py(py)
+        self.maybe_decode(
+            py,
+            RawResult::BytesPairs(parse_config_get_reply(r.map_err(to_py_err)?)).into_py(py)?,
+        )
     }
 
     /// CONFIG SET — accepts either `(name, value)` positional args, or a
@@ -665,7 +669,7 @@ impl Redis {
         let cmd = cmd_client_getname();
         let r: redis::RedisResult<Option<Vec<u8>>> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::OptBytes(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::OptBytes(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     fn client_setname(&self, py: Python<'_>, name: &str) -> PyResult<()> {
@@ -680,7 +684,7 @@ impl Redis {
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         let bytes = value_to_bytes(r.map_err(to_py_err)?);
-        Ok(PyBytes::new(py, &bytes).into_any().unbind())
+        self.maybe_decode(py, PyBytes::new(py, &bytes).into_any().unbind())
     }
 
     #[pyo3(signature = (*, client_type=None, client_id=None))]
@@ -696,7 +700,7 @@ impl Redis {
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
         let text = value_to_bytes(r.map_err(to_py_err)?);
         let rows = parse_client_list_reply(&text);
-        RawResult::BytesPairsList(rows).into_py(py)
+        self.maybe_decode(py, RawResult::BytesPairsList(rows).into_py(py)?)
     }
 
     // --- CLIENT KILL / PAUSE / UNPAUSE / NO-EVICT / NO-TOUCH ---
@@ -776,7 +780,7 @@ impl Redis {
         let cmd = cmd_object_subcmd("ENCODING", key);
         let r: redis::RedisResult<Option<Vec<u8>>> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::OptBytes(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::OptBytes(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     fn object_idletime(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
@@ -804,7 +808,10 @@ impl Redis {
         let cmd = cmd_object_help();
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::BytesList(parse_help_reply(r.map_err(to_py_err)?)).into_py(py)
+        self.maybe_decode(
+            py,
+            RawResult::BytesList(parse_help_reply(r.map_err(to_py_err)?)).into_py(py)?,
+        )
     }
 
     // --- MEMORY USAGE ---
@@ -829,7 +836,10 @@ impl Redis {
         let cmd = cmd_echo(&bytes);
         let r: redis::RedisResult<Vec<u8>> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        Ok(PyBytes::new(py, &r.map_err(to_py_err)?).into_any().unbind())
+        self.maybe_decode(
+            py,
+            PyBytes::new(py, &r.map_err(to_py_err)?).into_any().unbind(),
+        )
     }
 
     // --- WAIT / WAITAOF ---
@@ -886,18 +896,24 @@ impl Redis {
         let cmd = cmd_bgsave(schedule);
         let r: redis::RedisResult<String> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        Ok(PyBytes::new(py, r.map_err(to_py_err)?.as_bytes())
-            .into_any()
-            .unbind())
+        self.maybe_decode(
+            py,
+            PyBytes::new(py, r.map_err(to_py_err)?.as_bytes())
+                .into_any()
+                .unbind(),
+        )
     }
 
     fn bgrewriteaof(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let cmd = cmd_bgrewriteaof();
         let r: redis::RedisResult<String> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        Ok(PyBytes::new(py, r.map_err(to_py_err)?.as_bytes())
-            .into_any()
-            .unbind())
+        self.maybe_decode(
+            py,
+            PyBytes::new(py, r.map_err(to_py_err)?.as_bytes())
+                .into_any()
+                .unbind(),
+        )
     }
 
     // --- DEBUG SLEEP (test-only) ---

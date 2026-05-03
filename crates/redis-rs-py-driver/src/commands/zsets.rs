@@ -743,11 +743,11 @@ impl Redis {
         if withscores {
             let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, render_scored_members(py, r.map_err(to_py_err)?)?)
         } else {
             let r: redis::RedisResult<Vec<Vec<u8>>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
         }
     }
 
@@ -816,11 +816,11 @@ impl Redis {
         if withscores {
             let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, render_scored_members(py, r.map_err(to_py_err)?)?)
         } else {
             let r: redis::RedisResult<Vec<Vec<u8>>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
         }
     }
 
@@ -841,11 +841,11 @@ impl Redis {
         if withscores {
             let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, render_scored_members(py, r.map_err(to_py_err)?)?)
         } else {
             let r: redis::RedisResult<Vec<Vec<u8>>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
         }
     }
 
@@ -862,7 +862,7 @@ impl Redis {
         let cmd = build_simple_range_cmd("ZRANGEBYLEX", key, min, max, false, offset, num)?;
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        py_bytes_list(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
     }
 
     #[pyo3(signature = (key, max, min, *, offset=None, num=None))]
@@ -878,7 +878,7 @@ impl Redis {
         let cmd = build_simple_range_cmd("ZREVRANGEBYLEX", key, max, min, false, offset, num)?;
         let r: redis::RedisResult<Vec<Vec<u8>>> =
             crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        py_bytes_list(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
     }
 
     // =====================================================================
@@ -1047,7 +1047,7 @@ impl Redis {
         let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = crate::sync_op!(py, self, conn, async {
             conn_method!(&mut *conn, c, c.zpopmin(key, count))
         });
-        render_scored_members(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, render_scored_members(py, r.map_err(to_py_err)?)?)
     }
 
     #[pyo3(signature = (key, *, count=1))]
@@ -1056,7 +1056,7 @@ impl Redis {
         let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> = crate::sync_op!(py, self, conn, async {
             conn_method!(&mut *conn, c, c.zpopmax(key, count))
         });
-        render_scored_members(py, r.map_err(to_py_err)?)
+        self.maybe_decode(py, render_scored_members(py, r.map_err(to_py_err)?)?)
     }
 
     #[pyo3(signature = (*keys, direction, count=1))]
@@ -1078,7 +1078,7 @@ impl Redis {
             dispatch_cmd!(&mut *conn, cmd)
         });
         let value = r.map_err(to_py_err)?;
-        render_zmpop_reply(py, value)
+        self.maybe_decode(py, render_zmpop_reply(py, value)?)
     }
 
     #[pyo3(signature = (*keys, timeout))]
@@ -1099,7 +1099,7 @@ impl Redis {
                 r.map_err(to_py_err)
             })
         });
-        render_bzpop_reply(py, r?)
+        self.maybe_decode(py, render_bzpop_reply(py, r?)?)
     }
 
     #[pyo3(signature = (*keys, timeout))]
@@ -1120,7 +1120,7 @@ impl Redis {
                 r.map_err(to_py_err)
             })
         });
-        render_bzpop_reply(py, r?)
+        self.maybe_decode(py, render_bzpop_reply(py, r?)?)
     }
 
     #[pyo3(signature = (*keys, direction, timeout, count=1))]
@@ -1150,7 +1150,7 @@ impl Redis {
                 r.map_err(to_py_err)
             })
         });
-        render_zmpop_reply(py, r?)
+        self.maybe_decode(py, render_zmpop_reply(py, r?)?)
     }
 
     // =====================================================================
@@ -1176,7 +1176,10 @@ impl Redis {
             }
             dispatch_cmd!(&mut *conn, cmd)
         });
-        render_zrandmember(py, r.map_err(to_py_err)?, count, withscores)
+        self.maybe_decode(
+            py,
+            render_zrandmember(py, r.map_err(to_py_err)?, count, withscores)?,
+        )
     }
 
     // =====================================================================
@@ -1216,7 +1219,8 @@ impl Redis {
             })
             .collect::<PyResult<_>>()?;
         let list_py = PyList::new(py, pairs)?.into_any().unbind();
-        Ok(PyTuple::new(py, [cursor_py, list_py])?.into_any().unbind())
+        let result = PyTuple::new(py, [cursor_py, list_py])?.into_any().unbind();
+        self.maybe_decode(py, result)
     }
 
     // =====================================================================
@@ -1237,11 +1241,11 @@ impl Redis {
         if withscores {
             let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, render_scored_members(py, r.map_err(to_py_err)?)?)
         } else {
             let r: redis::RedisResult<Vec<Vec<u8>>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
         }
     }
 
@@ -1259,11 +1263,11 @@ impl Redis {
         if withscores {
             let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, render_scored_members(py, r.map_err(to_py_err)?)?)
         } else {
             let r: redis::RedisResult<Vec<Vec<u8>>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
         }
     }
 
@@ -1285,11 +1289,11 @@ impl Redis {
         if withscores {
             let r: redis::RedisResult<Vec<(Vec<u8>, f64)>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            render_scored_members(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, render_scored_members(py, r.map_err(to_py_err)?)?)
         } else {
             let r: redis::RedisResult<Vec<Vec<u8>>> =
                 crate::sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-            py_bytes_list(py, r.map_err(to_py_err)?)
+            self.maybe_decode(py, py_bytes_list(py, r.map_err(to_py_err)?)?)
         }
     }
 
@@ -1891,7 +1895,8 @@ impl AsyncRedis {
             .await;
             let _ = tx.send(raw);
         });
-        Ok(awaitable.into_pyobject(py)?.into_any().unbind())
+        let aw_py = awaitable.into_pyobject(py)?.into_any().unbind();
+        self.maybe_wrap(py, aw_py)
     }
 
     #[pyo3(signature = (*keys, timeout))]
@@ -1919,7 +1924,8 @@ impl AsyncRedis {
             .await;
             let _ = tx.send(raw);
         });
-        Ok(awaitable.into_pyobject(py)?.into_any().unbind())
+        let aw_py = awaitable.into_pyobject(py)?.into_any().unbind();
+        self.maybe_wrap(py, aw_py)
     }
 
     #[pyo3(signature = (*keys, direction, timeout, count=1))]
@@ -1956,7 +1962,8 @@ impl AsyncRedis {
             .await;
             let _ = tx.send(raw);
         });
-        Ok(awaitable.into_pyobject(py)?.into_any().unbind())
+        let aw_py = awaitable.into_pyobject(py)?.into_any().unbind();
+        self.maybe_wrap(py, aw_py)
     }
 
     // =====================================================================
@@ -1995,7 +2002,8 @@ impl AsyncRedis {
             };
             let _ = tx.send(raw);
         });
-        Ok(awaitable.into_pyobject(py)?.into_any().unbind())
+        let aw_py = awaitable.into_pyobject(py)?.into_any().unbind();
+        self.maybe_wrap(py, aw_py)
     }
 
     // =====================================================================

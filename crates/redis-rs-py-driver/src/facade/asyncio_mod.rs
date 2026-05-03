@@ -25,6 +25,18 @@ pub struct AsyncRedis {
     pub(crate) connection: ValkeyConn,
     pub(crate) url: String,
     pub(crate) closed: bool,
+    pub(crate) decode: Option<crate::facade::decode::DecodeOpts>,
+}
+
+impl AsyncRedis {
+    /// If decode_responses is on, wrap the awaitable in a coroutine that
+    /// awaits then decodes. Otherwise return the awaitable as-is.
+    pub(crate) fn maybe_wrap(&self, py: Python<'_>, awaitable: Py<PyAny>) -> PyResult<Py<PyAny>> {
+        match &self.decode {
+            Some(opts) => crate::facade::decode::wrap_awaitable(py, awaitable, opts),
+            None => Ok(awaitable),
+        }
+    }
 }
 
 // =========================================================================
@@ -191,6 +203,7 @@ impl AsyncRedis {
             connection: sync_redis.connection,
             url: sync_redis.url,
             closed: false,
+            decode: sync_redis.decode,
         })
     }
 

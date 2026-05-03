@@ -174,7 +174,7 @@ impl Redis {
         let cmd = cmd_eval("EVAL", script, &keys, &args);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::Value(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::Value(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     #[pyo3(signature = (sha, keys, args))]
@@ -188,7 +188,7 @@ impl Redis {
         let cmd = cmd_eval("EVALSHA", sha, &keys, &args);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::Value(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::Value(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     #[pyo3(signature = (script, keys, args))]
@@ -202,7 +202,7 @@ impl Redis {
         let cmd = cmd_eval("EVAL_RO", script, &keys, &args);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::Value(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::Value(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     #[pyo3(signature = (sha, keys, args))]
@@ -216,7 +216,7 @@ impl Redis {
         let cmd = cmd_eval("EVALSHA_RO", sha, &keys, &args);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::Value(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::Value(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     // --- SCRIPT LOAD / EXISTS / FLUSH / KILL ---
@@ -267,7 +267,7 @@ impl Redis {
         let cmd = cmd_fcall("FCALL", function, &keys, &args);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::Value(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::Value(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     #[pyo3(signature = (function, keys, args))]
@@ -281,7 +281,7 @@ impl Redis {
         let cmd = cmd_fcall("FCALL_RO", function, &keys, &args);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::Value(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::Value(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     // --- FUNCTION LOAD / DELETE / DUMP / FLUSH / LIST / STATS / KILL / RESTORE ---
@@ -305,9 +305,12 @@ impl Redis {
         let cmd = cmd_function_dump();
         let r: redis::RedisResult<Vec<u8>> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        Ok(pyo3::types::PyBytes::new(py, &r.map_err(to_py_err)?)
-            .into_any()
-            .unbind())
+        self.maybe_decode(
+            py,
+            pyo3::types::PyBytes::new(py, &r.map_err(to_py_err)?)
+                .into_any()
+                .unbind(),
+        )
     }
 
     #[pyo3(signature = (*, mode=None))]
@@ -331,14 +334,14 @@ impl Redis {
         let cmd = cmd_function_list(library.as_deref(), withcode);
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::Value(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::Value(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     fn function_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let cmd = cmd_function_stats();
         let r: redis::RedisResult<redis::Value> =
             sync_op!(py, self, conn, async { dispatch_cmd!(&mut *conn, cmd) });
-        RawResult::Value(r.map_err(to_py_err)?).into_py(py)
+        self.maybe_decode(py, RawResult::Value(r.map_err(to_py_err)?).into_py(py)?)
     }
 
     fn function_kill(&self, py: Python<'_>) -> PyResult<()> {

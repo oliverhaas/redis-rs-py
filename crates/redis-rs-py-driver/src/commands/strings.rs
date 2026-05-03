@@ -108,7 +108,7 @@ impl Redis {
         let r: Result<Option<Vec<u8>>, _> = sync_op!(py, self, conn, async {
             crate::conn_method!(&mut *conn, c, c.get(key))
         });
-        Ok(py_opt_bytes(py, r.map_err(crate::errors::to_py_err)?))
+        self.maybe_decode(py, py_opt_bytes(py, r.map_err(crate::errors::to_py_err)?))
     }
 
     #[pyo3(signature = (
@@ -146,7 +146,7 @@ impl Redis {
                 .await
         });
         let v = r.map_err(to_py_err)?;
-        set_value_to_py(py, v, get)
+        self.maybe_decode(py, set_value_to_py(py, v, get)?)
     }
 
     // ----- DELETE (varargs) ------------------------------------------------
@@ -185,7 +185,7 @@ impl Redis {
                     crate::dispatch_cmd!(&mut *conn, cmd)
                 });
                 let bytes = r.map_err(to_py_err)?;
-                Ok(PyBytes::new(py, &bytes).into_any().unbind())
+                self.maybe_decode(py, PyBytes::new(py, &bytes).into_any().unbind())
             }
         }
     }
@@ -229,7 +229,7 @@ impl Redis {
         let r: redis::RedisResult<Option<Vec<u8>>> = sync_op!(py, self, conn, async {
             conn.getex(name, ex, px, exat, pxat, persist).await
         });
-        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+        self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
     }
 
     // ----- GETDEL ----------------------------------------------------------
@@ -237,7 +237,7 @@ impl Redis {
     fn getdel(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Option<Vec<u8>>> =
             sync_op!(py, self, conn, async { conn.getdel(name).await });
-        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+        self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
     }
 
     // ----- GETRANGE --------------------------------------------------------
@@ -246,7 +246,10 @@ impl Redis {
         let r: redis::RedisResult<Vec<u8>> = sync_op!(py, self, conn, async {
             conn.getrange(name, start, end).await
         });
-        Ok(PyBytes::new(py, &r.map_err(to_py_err)?).into_any().unbind())
+        self.maybe_decode(
+            py,
+            PyBytes::new(py, &r.map_err(to_py_err)?).into_any().unbind(),
+        )
     }
 
     // ----- SETRANGE --------------------------------------------------------
@@ -285,7 +288,10 @@ impl Redis {
                 None => py.None(),
             })
             .collect();
-        Ok(pyo3::types::PyList::new(py, py_items)?.into_any().unbind())
+        self.maybe_decode(
+            py,
+            pyo3::types::PyList::new(py, py_items)?.into_any().unbind(),
+        )
     }
 
     // ----- MSET ------------------------------------------------------------
@@ -500,7 +506,7 @@ impl Redis {
     fn dump(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
         let r: redis::RedisResult<Option<Vec<u8>>> =
             sync_op!(py, self, conn, async { conn.dump(name).await });
-        Ok(py_opt_bytes(py, r.map_err(to_py_err)?))
+        self.maybe_decode(py, py_opt_bytes(py, r.map_err(to_py_err)?))
     }
 
     // ----- RESTORE --------------------------------------------------------
