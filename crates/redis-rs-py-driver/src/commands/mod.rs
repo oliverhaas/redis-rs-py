@@ -6,4 +6,5 @@
 //
 // New families append a `pub mod <family>;` line below.
 
+pub mod lists;
 pub mod strings;

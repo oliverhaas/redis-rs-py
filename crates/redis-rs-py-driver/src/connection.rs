@@ -41,8 +41,6 @@ pub struct ClientCacheOpts {
     pub ttl_secs: u64,
 }
 
-// `url` and `tls_opts` are read by `build_blocking` (Plan 04 wires this up).
-#[allow(dead_code)]
 #[derive(Clone)]
 enum ConnConfig {
     Standard {
@@ -56,9 +54,6 @@ pub enum ValkeyConnInner {
     Standard(ConnectionManager),
 }
 
-// `blocking` and `config` are consumed by `get_blocking` (Plan 04 wires it up
-// through the `BLPOP`/`BLMOVE`/`BLMPOP` driver methods).
-#[allow(dead_code)]
 #[derive(Clone)]
 pub struct ValkeyConn {
     regular: ValkeyConnInner,
@@ -81,8 +76,7 @@ impl std::ops::DerefMut for ValkeyConn {
 
 impl ValkeyConn {
     /// Lazily initialize a second connection for blocking commands so they
-    /// don't head-of-line-block the multiplexed pipeline. Used by Plan 04.
-    #[allow(dead_code)]
+    /// don't head-of-line-block the multiplexed pipeline.
     pub async fn get_blocking(&self) -> RedisResult<ValkeyConnInner> {
         let conn = self
             .blocking
@@ -95,6 +89,53 @@ impl ValkeyConn {
         match &self.regular {
             ValkeyConnInner::Standard(c) => c.get_cache_statistics(),
         }
+    }
+
+    pub async fn blpop(
+        &self,
+        keys: &[String],
+        timeout: f64,
+    ) -> RedisResult<Option<(String, Vec<u8>)>> {
+        let mut conn = self.get_blocking().await?;
+        conn.blpop(keys, timeout).await
+    }
+
+    pub async fn brpop(
+        &self,
+        keys: &[String],
+        timeout: f64,
+    ) -> RedisResult<Option<(String, Vec<u8>)>> {
+        let mut conn = self.get_blocking().await?;
+        conn.brpop(keys, timeout).await
+    }
+
+    pub async fn blmove(
+        &self,
+        src: &str,
+        dst: &str,
+        wherefrom: &str,
+        whereto: &str,
+        timeout: f64,
+    ) -> RedisResult<Option<Vec<u8>>> {
+        let mut conn = self.get_blocking().await?;
+        conn.blmove(src, dst, wherefrom, whereto, timeout).await
+    }
+
+    pub async fn blmpop(
+        &self,
+        timeout: f64,
+        keys: &[String],
+        direction: &str,
+        count: i64,
+    ) -> RedisResult<Option<(String, Vec<Vec<u8>>)>> {
+        let mut conn = self.get_blocking().await?;
+        conn.blmpop(timeout, keys, direction, count).await
+    }
+
+    /// Test-only helper: returns true if the lazy blocking connection
+    /// has been initialised, else false.
+    pub fn blocking_initialised(&self) -> bool {
+        self.blocking.initialized()
     }
 }
 
@@ -145,8 +186,6 @@ fn conn_manager_config(cache: Option<&ClientCacheOpts>) -> ConnectionManagerConf
     cfg
 }
 
-// Used by `build_blocking` (Plan 04).
-#[allow(dead_code)]
 fn blocking_conn_manager_config() -> ConnectionManagerConfig {
     ConnectionManagerConfig::new()
         .set_pipeline_buffer_size(1000)
@@ -174,8 +213,6 @@ pub async fn connect_standard(
     })
 }
 
-// Called by `ValkeyConn::get_blocking` (Plan 04).
-#[allow(dead_code)]
 async fn build_blocking(cfg: &ConnConfig) -> RedisResult<ValkeyConnInner> {
     match cfg {
         ConnConfig::Standard { url, tls_opts } => {
@@ -590,5 +627,301 @@ fn append_expire_flag(cmd: &mut redis::Cmd, nx: bool, xx: bool, gt: bool, lt: bo
         cmd.arg("GT");
     } else if lt {
         cmd.arg("LT");
+    }
+}
+
+// =========================================================================
+// List command helpers on ValkeyConnInner (Plan 04)
+// =========================================================================
+
+impl ValkeyConnInner {
+    pub async fn lpush(&mut self, key: &str, values: &[Vec<u8>]) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("LPUSH");
+        cmd.arg(key);
+        for v in values {
+            cmd.arg(v.as_slice());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn rpush(&mut self, key: &str, values: &[Vec<u8>]) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("RPUSH");
+        cmd.arg(key);
+        for v in values {
+            cmd.arg(v.as_slice());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn lpushx(&mut self, key: &str, values: &[Vec<u8>]) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("LPUSHX");
+        cmd.arg(key);
+        for v in values {
+            cmd.arg(v.as_slice());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn rpushx(&mut self, key: &str, values: &[Vec<u8>]) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("RPUSHX");
+        cmd.arg(key);
+        for v in values {
+            cmd.arg(v.as_slice());
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn lpop_one(&mut self, key: &str) -> redis::RedisResult<Option<Vec<u8>>> {
+        let mut cmd = redis::cmd("LPOP");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn rpop_one(&mut self, key: &str) -> redis::RedisResult<Option<Vec<u8>>> {
+        let mut cmd = redis::cmd("RPOP");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    /// LPOP/RPOP with COUNT — returns Some(vec) (possibly empty) when the
+    /// key exists, None when it doesn't.
+    pub async fn lpop_count(
+        &mut self,
+        key: &str,
+        count: u64,
+    ) -> redis::RedisResult<Option<Vec<Vec<u8>>>> {
+        let mut cmd = redis::cmd("LPOP");
+        cmd.arg(key).arg(count);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn rpop_count(
+        &mut self,
+        key: &str,
+        count: u64,
+    ) -> redis::RedisResult<Option<Vec<Vec<u8>>>> {
+        let mut cmd = redis::cmd("RPOP");
+        cmd.arg(key).arg(count);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn lrange(
+        &mut self,
+        key: &str,
+        start: i64,
+        stop: i64,
+    ) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("LRANGE");
+        cmd.arg(key).arg(start).arg(stop);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn llen(&mut self, key: &str) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("LLEN");
+        cmd.arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn lmove(
+        &mut self,
+        src: &str,
+        dst: &str,
+        wherefrom: &str,
+        whereto: &str,
+    ) -> redis::RedisResult<Option<Vec<u8>>> {
+        let mut cmd = redis::cmd("LMOVE");
+        cmd.arg(src).arg(dst).arg(wherefrom).arg(whereto);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    /// LPOS without COUNT: returns Option<i64>.
+    pub async fn lpos_single(
+        &mut self,
+        key: &str,
+        element: &[u8],
+        rank: Option<i64>,
+        maxlen: Option<i64>,
+    ) -> redis::RedisResult<Option<i64>> {
+        let mut cmd = redis::cmd("LPOS");
+        cmd.arg(key).arg(element);
+        if let Some(r) = rank {
+            cmd.arg("RANK").arg(r);
+        }
+        if let Some(m) = maxlen {
+            cmd.arg("MAXLEN").arg(m);
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    /// LPOS with COUNT: returns Vec<i64>. Note: COUNT 0 = all matches.
+    pub async fn lpos_count(
+        &mut self,
+        key: &str,
+        element: &[u8],
+        rank: Option<i64>,
+        count: i64,
+        maxlen: Option<i64>,
+    ) -> redis::RedisResult<Vec<i64>> {
+        let mut cmd = redis::cmd("LPOS");
+        cmd.arg(key).arg(element);
+        if let Some(r) = rank {
+            cmd.arg("RANK").arg(r);
+        }
+        cmd.arg("COUNT").arg(count);
+        if let Some(m) = maxlen {
+            cmd.arg("MAXLEN").arg(m);
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn lrem(&mut self, key: &str, count: i64, value: &[u8]) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("LREM");
+        cmd.arg(key).arg(count).arg(value);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn lindex(&mut self, key: &str, index: i64) -> redis::RedisResult<Option<Vec<u8>>> {
+        let mut cmd = redis::cmd("LINDEX");
+        cmd.arg(key).arg(index);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn lset(&mut self, key: &str, index: i64, value: &[u8]) -> redis::RedisResult<()> {
+        let mut cmd = redis::cmd("LSET");
+        cmd.arg(key).arg(index).arg(value);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn linsert(
+        &mut self,
+        key: &str,
+        before: bool,
+        pivot: &[u8],
+        value: &[u8],
+    ) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("LINSERT");
+        cmd.arg(key)
+            .arg(if before { "BEFORE" } else { "AFTER" })
+            .arg(pivot)
+            .arg(value);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn ltrim(&mut self, key: &str, start: i64, stop: i64) -> redis::RedisResult<()> {
+        let mut cmd = redis::cmd("LTRIM");
+        cmd.arg(key).arg(start).arg(stop);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    /// LMPOP: pop from the first non-empty key. Returns
+    /// Some((key, vec_of_popped)) or None.
+    pub async fn lmpop(
+        &mut self,
+        keys: &[String],
+        direction: &str,
+        count: i64,
+    ) -> redis::RedisResult<Option<(String, Vec<Vec<u8>>)>> {
+        let mut cmd = redis::cmd("LMPOP");
+        cmd.arg(keys.len()).arg(keys);
+        cmd.arg(direction);
+        cmd.arg("COUNT").arg(count);
+        let val: redis::Value = crate::dispatch_cmd!(self, cmd)?;
+        match val {
+            redis::Value::Nil => Ok(None),
+            redis::Value::Array(mut items) if items.len() == 2 => {
+                let elements_val = items.pop().unwrap();
+                let key_val = items.pop().unwrap();
+                let key: String = redis::from_redis_value(key_val)?;
+                let elements: Vec<Vec<u8>> = redis::from_redis_value(elements_val)?;
+                Ok(Some((key, elements)))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub async fn blpop(
+        &mut self,
+        keys: &[String],
+        timeout: f64,
+    ) -> redis::RedisResult<Option<(String, Vec<u8>)>> {
+        bpop_inner(self, "BLPOP", keys, timeout).await
+    }
+
+    pub async fn brpop(
+        &mut self,
+        keys: &[String],
+        timeout: f64,
+    ) -> redis::RedisResult<Option<(String, Vec<u8>)>> {
+        bpop_inner(self, "BRPOP", keys, timeout).await
+    }
+
+    pub async fn blmove(
+        &mut self,
+        src: &str,
+        dst: &str,
+        wherefrom: &str,
+        whereto: &str,
+        timeout: f64,
+    ) -> redis::RedisResult<Option<Vec<u8>>> {
+        let mut cmd = redis::cmd("BLMOVE");
+        cmd.arg(src)
+            .arg(dst)
+            .arg(wherefrom)
+            .arg(whereto)
+            .arg(timeout);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn blmpop(
+        &mut self,
+        timeout: f64,
+        keys: &[String],
+        direction: &str,
+        count: i64,
+    ) -> redis::RedisResult<Option<(String, Vec<Vec<u8>>)>> {
+        let mut cmd = redis::cmd("BLMPOP");
+        cmd.arg(timeout).arg(keys.len());
+        for k in keys {
+            cmd.arg(k.as_str());
+        }
+        cmd.arg(direction);
+        cmd.arg("COUNT").arg(count);
+        let val: redis::Value = crate::dispatch_cmd!(self, cmd)?;
+        match val {
+            redis::Value::Nil => Ok(None),
+            redis::Value::Array(mut items) if items.len() == 2 => {
+                let elements_val = items.pop().unwrap();
+                let key_val = items.pop().unwrap();
+                let key: String = redis::from_redis_value(key_val)?;
+                let elements: Vec<Vec<u8>> = redis::from_redis_value(elements_val)?;
+                Ok(Some((key, elements)))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
+async fn bpop_inner(
+    conn: &mut ValkeyConnInner,
+    command: &'static str,
+    keys: &[String],
+    timeout: f64,
+) -> redis::RedisResult<Option<(String, Vec<u8>)>> {
+    let mut cmd = redis::cmd(command);
+    for k in keys {
+        cmd.arg(k.as_str());
+    }
+    cmd.arg(timeout);
+    let val: redis::Value = crate::dispatch_cmd!(conn, cmd)?;
+    match val {
+        redis::Value::Nil => Ok(None),
+        redis::Value::Array(mut items) if items.len() == 2 => {
+            let value_val = items.pop().unwrap();
+            let key_val = items.pop().unwrap();
+            let key: String = redis::from_redis_value(key_val)?;
+            let value: Vec<u8> = redis::from_redis_value(value_val)?;
+            Ok(Some((key, value)))
+        }
+        _ => Ok(None),
     }
 }

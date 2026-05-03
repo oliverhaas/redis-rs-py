@@ -251,4 +251,9 @@ impl RedisRsDriver {
             }
         })
     }
+
+    /// Test-only: True once the lazy blocking connection has been allocated.
+    fn _blocking_initialised(&self) -> bool {
+        self.connection.blocking_initialised()
+    }
 }
