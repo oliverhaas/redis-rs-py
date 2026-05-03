@@ -41,6 +41,8 @@ pub struct ClientCacheOpts {
     pub ttl_secs: u64,
 }
 
+// `url` and `tls_opts` are read by `build_blocking` (Plan 04 wires this up).
+#[allow(dead_code)]
 #[derive(Clone)]
 enum ConnConfig {
     Standard {
@@ -54,6 +56,9 @@ pub enum ValkeyConnInner {
     Standard(ConnectionManager),
 }
 
+// `blocking` and `config` are consumed by `get_blocking` (Plan 04 wires it up
+// through the `BLPOP`/`BLMOVE`/`BLMPOP` driver methods).
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct ValkeyConn {
     regular: ValkeyConnInner,
@@ -77,6 +82,7 @@ impl std::ops::DerefMut for ValkeyConn {
 impl ValkeyConn {
     /// Lazily initialize a second connection for blocking commands so they
     /// don't head-of-line-block the multiplexed pipeline. Used by Plan 04.
+    #[allow(dead_code)]
     pub async fn get_blocking(&self) -> RedisResult<ValkeyConnInner> {
         let conn = self
             .blocking
@@ -139,6 +145,8 @@ fn conn_manager_config(cache: Option<&ClientCacheOpts>) -> ConnectionManagerConf
     cfg
 }
 
+// Used by `build_blocking` (Plan 04).
+#[allow(dead_code)]
 fn blocking_conn_manager_config() -> ConnectionManagerConfig {
     ConnectionManagerConfig::new()
         .set_pipeline_buffer_size(1000)
@@ -166,6 +174,8 @@ pub async fn connect_standard(
     })
 }
 
+// Called by `ValkeyConn::get_blocking` (Plan 04).
+#[allow(dead_code)]
 async fn build_blocking(cfg: &ConnConfig) -> RedisResult<ValkeyConnInner> {
     match cfg {
         ConnConfig::Standard { url, tls_opts } => {

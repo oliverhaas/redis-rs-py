@@ -16,7 +16,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 use redis::AsyncCommands;
 
-use crate::async_bridge::{RawResult, RedisRsAwaitable};
+use crate::async_bridge::RawResult;
 use crate::connection::{ClientCacheOpts, TlsOpts, ValkeyConn, connect_standard, url_with_resp3};
 use crate::errors::to_py_err;
 use crate::raw_result::IntoRawResult;
@@ -64,10 +64,12 @@ pub(crate) fn py_opt_bytes(py: Python<'_>, v: Option<Vec<u8>>) -> Py<PyAny> {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn py_int(py: Python<'_>, v: i64) -> PyResult<Py<PyAny>> {
     Ok(v.into_pyobject(py)?.into_any().unbind())
 }
 
+#[allow(dead_code)]
 pub(crate) fn py_bool(py: Python<'_>, v: bool) -> PyResult<Py<PyAny>> {
     Ok(v.into_pyobject(py)?.to_owned().into_any().unbind())
 }
@@ -180,7 +182,7 @@ impl RedisRsDriver {
     fn cache_statistics(&self) -> Option<(usize, usize, usize)> {
         self.connection
             .cache_statistics()
-            .map(|s| (s.hit as usize, s.miss as usize, s.invalidate as usize))
+            .map(|s| (s.hit, s.miss, s.invalidate))
     }
 
     // --- get / aget --------------------------------------------------------
