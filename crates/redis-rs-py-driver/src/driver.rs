@@ -17,7 +17,7 @@ use pyo3::types::{PyBytes, PyDict, PyList, PyString, PyTuple};
 use redis::AsyncCommands;
 
 use crate::async_bridge::{RawResult, RedisRsAwaitable};
-use crate::connection::{ClientCacheOpts, TlsOpts, ValkeyConn, connect_standard};
+use crate::connection::{ClientCacheOpts, TlsOpts, ValkeyConn, connect_standard, url_with_resp3};
 use crate::errors::to_py_err;
 use crate::raw_result::IntoRawResult;
 use crate::runtime::get_runtime;
@@ -155,6 +155,12 @@ impl RedisRsDriver {
         } else {
             None
         };
+        // Store the resp3-rewritten URL on the driver so the `connection_url`
+        // getter reflects what the connection actually sees. `url_with_resp3`
+        // is idempotent — `connect_standard` re-applies it internally without
+        // double-rewriting because it short-circuits on `protocol=` already
+        // present.
+        let url = url_with_resp3(&url);
         let url_clone = url.clone();
         let conn = py.detach(|| {
             get_runtime()
