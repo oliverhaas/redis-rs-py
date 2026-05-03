@@ -1,0 +1,122 @@
+[project]
+name = "redis-rs-py"
+version = "0.1.0a1"
+description = "High-performance, drop-in replacement for redis-py and valkey-py, built on PyO3 + tokio + redis-rs"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.14"
+keywords = ["redis", "valkey", "rust", "pyo3", "client"]
+authors = [{ name = "Oliver Haas", email = "ohaas@e1plus.de" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Free Threading :: 1 - Unstable",
+  "Programming Language :: Rust",
+  "Topic :: Database",
+  "Topic :: Software Development :: Libraries",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/oliverhaas/redis-rs-py"
+Repository = "https://github.com/oliverhaas/redis-rs-py.git"
+Issues = "https://github.com/oliverhaas/redis-rs-py/issues"
+
+[dependency-groups]
+dev = [
+  "maturin==1.13.1",
+  "pre-commit==4.6.0",
+  "pytest==9.0.3",
+  "pytest-asyncio==1.3.0",
+  "pytest-cov==7.1.0",
+  "pytest-xdist==3.8.0",
+  "ruff==0.15.12",
+  "testcontainers==4.14.2",
+  "ty==0.0.33",
+  # Reference clients used by the parity test suite
+  "redis==7.4.0",
+  "valkey==6.1.1",
+]
+
+[build-system]
+requires = ["maturin>=1.13,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+module-name = "redis_rs_py._driver"
+features = ["pyo3/extension-module"]
+python-source = "python"
+manifest-path = "crates/redis-rs-py-driver/Cargo.toml"
+include = ["LICENSE"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 120
+fix = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "A002",    # min/max param names match Redis API (ZCOUNT key min max, etc.)
+  "A003",    # Method names like `set`/`type` mirror the Redis API
+  "ANN401",  # Any is correct for arbitrary Redis values
+  "COM812",  # Conflicts with ruff-format
+  "D",       # Docstrings — add incrementally
+  "E501",    # Line length handled by config
+  "EM",      # Inline exception strings are fine
+  "FBT",     # Boolean params match Redis API
+  "PLR0913", # Many args expected for Redis commands with options
+  "PLR2004", # Magic values like -2 for TTL are Redis-documented
+  "TRY003",  # Long exception messages help debugging
+]
+
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = true
+suppress-none-returning = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "ANN",
+  "ARG",
+  "F841",
+  "FBT",
+  "PT006",
+  "PT011",
+  "PT013",
+  "PT018",
+  "S101",
+  "S105",
+]
+"benchmarks/**" = ["ANN", "ARG", "BLE001", "S101", "T201", "TC001", "TC003"]
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[[tool.ty.overrides]]
+include = ["tests/**"]
+
+[tool.ty.overrides.rules]
+unresolved-attribute = "ignore"
+invalid-argument-type = "ignore"
+
+[tool.pytest.ini_options]
+addopts = "--cov=redis_rs_py --cov-report=term-missing --cov-report=xml --no-cov-on-fail"
+testpaths = ["tests"]
+xfail_strict = true
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+precision = 2
+skip_covered = true

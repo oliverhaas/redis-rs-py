@@ -1,0 +1,81 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g., 0.1.0)"
+        required: true
+
+jobs:
+  build-wheels:
+    name: Build wheels (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64
+            cibw_archs: x86_64
+            cibw_build: cp314-manylinux_x86_64 cp314t-manylinux_x86_64
+          - os: ubuntu-24.04-arm
+            label: linux-aarch64
+            cibw_archs: aarch64
+            cibw_build: cp314-manylinux_aarch64 cp314t-manylinux_aarch64
+          - os: macos-14
+            label: macos-arm64
+            cibw_archs: arm64
+            cibw_build: cp314-macosx_arm64 cp314t-macosx_arm64
+          - os: windows-latest
+            label: windows-amd64
+            cibw_archs: AMD64
+            cibw_build: cp314-win_amd64 cp314t-win_amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.version && format('v{0}', github.event.inputs.version) || github.ref }}
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.4
+        env:
+          CIBW_BUILD: ${{ matrix.cibw_build }}
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          CIBW_BEFORE_ALL_LINUX: |
+            curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH"
+
+      # sdist is a single artifact — only build it once on the Linux x86_64 leg.
+      - name: Build sdist
+        if: matrix.label == 'linux-x86_64'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out wheelhouse/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.label }}
+          path: wheelhouse/*
+
+  publish:
+    needs: [build-wheels]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/redis-rs-py/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

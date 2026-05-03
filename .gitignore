@@ -1,0 +1,24 @@
+*.py[cod]
+__pycache__/
+.DS_Store
+*.egg-info
+/build/
+/dist/
+*.swp
+.idea
+.venv
+.coverage
+coverage.xml
+.mypy_cache
+.ruff_cache
+.pytest_cache
+dump.rdb
+CLAUDE.md
+.worktrees/
+*.sqlite3
+
+# Rust build artifacts
+target/
+python/redis_rs_py/_driver*.so
+python/redis_rs_py/_driver*.pyd
+wheelhouse/

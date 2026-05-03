@@ -1,0 +1,30 @@
+[package]
+name = "redis-rs-py-driver"
+version = "0.1.0-alpha.1"
+edition = "2024"
+description = "Rust I/O driver for redis-rs-py — PyO3 + tokio + redis-rs"
+license = "MIT"
+repository = "https://github.com/oliverhaas/redis-rs-py"
+publish = false
+
+[lib]
+name = "_driver"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+redis = { version = "1", features = [
+  "tokio-comp",
+  "connection-manager",
+  "cluster",
+  "cluster-async",
+  "tokio-rustls-comp",
+  "tls-rustls-insecure",
+  "cache-aio",
+] }
+rustls = { version = "0.23", features = ["ring"] }
+
+[profile.release]
+lto = true
+strip = true
