@@ -99,7 +99,7 @@ def valkey_url(
 class _DriverCompat:
     """Thin compatibility shim that exposes both sync (Redis) and async
     (AsyncRedis) APIs on a single object, preserving the old
-    ``RedisRsDriver`` call surface so existing tests need no changes.
+    ``Redis``/``AsyncRedis`` call surface so existing tests need no changes.
 
     Sync method calls are forwarded to ``_sync``.
     Calls with an ``a`` prefix (e.g. ``driver.aset(...)``) are forwarded

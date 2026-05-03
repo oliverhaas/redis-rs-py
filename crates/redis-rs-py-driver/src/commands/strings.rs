@@ -103,7 +103,7 @@ fn set_value_to_py(py: Python<'_>, v: redis::Value, get: bool) -> PyResult<Py<Py
 impl Redis {
     // ----- GET / SET -------------------------------------------------------
 
-    fn get(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+    pub(crate) fn get(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         use redis::AsyncCommands;
         let r: Result<Option<Vec<u8>>, _> = sync_op!(py, self, conn, async {
             crate::conn_method!(&mut *conn, c, c.get(key))
@@ -125,7 +125,7 @@ impl Redis {
         pxat = None,
     ))]
     #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
-    fn set(
+    pub(crate) fn set(
         &self,
         py: Python<'_>,
         name: &str,

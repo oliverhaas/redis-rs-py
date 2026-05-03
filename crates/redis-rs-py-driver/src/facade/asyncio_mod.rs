@@ -2,7 +2,7 @@
 //
 // Mirrors `redis.asyncio.Redis` — same constructor as the sync façade,
 // every command method returns a RedisRsAwaitable. The struct owns a
-// ValkeyConn directly (no Py<RedisRsDriver> indirection). Command methods
+// ValkeyConn directly (no Py-wrapped driver indirection). Command methods
 // are added via `#[pymethods] impl AsyncRedis` blocks in each
 // `commands/*.rs` file (PyO3 multiple-pymethods feature).
 

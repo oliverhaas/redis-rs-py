@@ -164,7 +164,7 @@ impl Redis {
     // --- EVAL / EVALSHA / EVAL_RO / EVALSHA_RO ---
 
     #[pyo3(signature = (script, keys, args))]
-    fn eval(
+    pub(crate) fn eval(
         &self,
         py: Python<'_>,
         script: &str,

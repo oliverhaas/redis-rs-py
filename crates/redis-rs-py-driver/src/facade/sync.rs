@@ -1,7 +1,7 @@
 // Sync façade: redis_rs_py.Redis.
 //
 // Mirrors redis-py's Redis class — same constructor kwargs, same method
-// names. The struct owns a ValkeyConn directly (no Py<RedisRsDriver>
+// names. The struct owns a ValkeyConn directly (no Py-wrapped driver
 // indirection). Command methods are added via `#[pymethods] impl Redis`
 // blocks in each `commands/*.rs` file (PyO3 multiple-pymethods feature).
 
@@ -9,7 +9,7 @@
 
 use pyo3::exceptions::{PyNotImplementedError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyTuple, PyType};
+use pyo3::types::{PyDict, PyTuple, PyType};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::connection::{TlsOpts, ValkeyConn, connect_standard, url_with_resp3};
@@ -524,21 +524,22 @@ impl Lock {
         let blocking_timeout = blocking_timeout.or(self.blocking_timeout);
         let token = token.unwrap_or_else(generate_token);
         let px = self.timeout.map(|s| (s * 1000.0) as i64).unwrap_or(0);
-        let r = self.redis.bind(py);
+        let r = self.redis.bind(py).borrow();
         let deadline = blocking_timeout.map(|t| now_secs() + t);
         loop {
-            let kw = PyDict::new(py);
-            kw.set_item("nx", true)?;
-            if px > 0 {
-                kw.set_item("px", px)?;
-            }
-            let res: Py<PyAny> = r
-                .call_method(
-                    "set",
-                    (self.name.clone(), PyBytes::new(py, &token)),
-                    Some(&kw),
-                )?
-                .unbind();
+            let res: Py<PyAny> = r.set(
+                py,
+                &self.name,
+                token.as_slice(),
+                /* ex */ None,
+                /* px */ if px > 0 { Some(px as u64) } else { None },
+                /* nx */ true,
+                /* xx */ false,
+                /* keepttl */ false,
+                /* get */ false,
+                /* exat */ None,
+                /* pxat */ None,
+            )?;
             let acquired = res.bind(py).is_truthy()?;
             if acquired {
                 *self.token.lock().unwrap() = Some(token);
@@ -575,20 +576,10 @@ impl Lock {
                 });
             }
         };
-        let r = self.redis.bind(py);
-        // eval(script, keys: [name], args: [token])
-        use pyo3::types::PyList;
-        let keys = PyList::new(py, [self.name.clone()])?;
-        let args = PyList::new(py, [PyBytes::new(py, &token).into_any()])?;
-        let eval_args = PyTuple::new(
-            py,
-            [
-                LOCK_RELEASE_LUA.into_pyobject(py)?.into_any(),
-                keys.into_any(),
-                args.into_any(),
-            ],
-        )?;
-        let n: i64 = r.call_method("eval", eval_args, None)?.extract()?;
+        let r = self.redis.bind(py).borrow();
+        let result: Py<PyAny> =
+            r.eval(py, LOCK_RELEASE_LUA, vec![self.name.clone()], vec![token])?;
+        let n: i64 = result.extract(py)?;
         if n == 0 {
             let exc = py
                 .import("redis_rs_py.exceptions")?
@@ -621,27 +612,11 @@ impl Lock {
                 });
             }
         };
-        let r = self.redis.bind(py);
-        // eval(script, keys: [name], args: [token, millis_as_bytes])
-        use pyo3::types::PyList;
-        let keys = PyList::new(py, [self.name.clone()])?;
+        let r = self.redis.bind(py).borrow();
         let millis_str = format!("{}", (additional_time * 1000.0) as i64);
-        let args = PyList::new(
-            py,
-            [
-                PyBytes::new(py, &token).into_any(),
-                PyBytes::new(py, millis_str.as_bytes()).into_any(),
-            ],
-        )?;
-        let eval_args = PyTuple::new(
-            py,
-            [
-                LOCK_EXTEND_LUA.into_pyobject(py)?.into_any(),
-                keys.into_any(),
-                args.into_any(),
-            ],
-        )?;
-        let n: i64 = r.call_method("eval", eval_args, None)?.extract()?;
+        let args = vec![token, millis_str.into_bytes()];
+        let result: Py<PyAny> = r.eval(py, LOCK_EXTEND_LUA, vec![self.name.clone()], args)?;
+        let n: i64 = result.extract(py)?;
         Ok(n > 0)
     }
 
@@ -650,14 +625,14 @@ impl Lock {
             Some(t) => t,
             None => return Ok(false),
         };
-        let r = self.redis.bind(py);
-        let val: Option<Vec<u8>> = r.call_method1("get", (self.name.clone(),))?.extract()?;
+        let r = self.redis.bind(py).borrow();
+        let val: Option<Vec<u8>> = r.get(py, &self.name)?.extract(py)?;
         Ok(val.as_deref() == Some(token.as_slice()))
     }
 
     fn locked(&self, py: Python<'_>) -> PyResult<bool> {
-        let r = self.redis.bind(py);
-        let val: Option<Vec<u8>> = r.call_method1("get", (self.name.clone(),))?.extract()?;
+        let r = self.redis.bind(py).borrow();
+        let val: Option<Vec<u8>> = r.get(py, &self.name)?.extract(py)?;
         Ok(val.is_some())
     }
 

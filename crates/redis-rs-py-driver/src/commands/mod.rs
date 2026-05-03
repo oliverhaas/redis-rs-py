@@ -1,6 +1,6 @@
 // Per-family command modules.
 //
-// Each file holds a `#[pymethods] impl RedisRsDriver` block adding that
+// Each file holds `#[pymethods] impl Redis` and `impl AsyncRedis` blocks adding that
 // family's commands. PyO3 0.28 supports multiple `#[pymethods]` blocks
 // per class as long as method names are unique across blocks.
 //

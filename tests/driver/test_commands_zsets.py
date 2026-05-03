@@ -1,4 +1,4 @@
-"""Sorted-set command coverage on RedisRsDriver — Plan 07."""
+"""Sorted-set command coverage on Redis/AsyncRedis — Plan 07."""
 
 from __future__ import annotations
 

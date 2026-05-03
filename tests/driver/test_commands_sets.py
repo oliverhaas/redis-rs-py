@@ -1,4 +1,4 @@
-"""Set command coverage on RedisRsDriver — Plan 06."""
+"""Set command coverage on Redis/AsyncRedis — Plan 06."""
 
 from __future__ import annotations
 

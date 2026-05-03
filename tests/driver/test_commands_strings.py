@@ -1,4 +1,4 @@
-"""String command tests for RedisRsDriver — Plan 03."""
+"""String command tests for Redis/AsyncRedis — Plan 03."""
 
 from __future__ import annotations
 
