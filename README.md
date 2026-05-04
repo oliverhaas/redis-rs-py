@@ -299,7 +299,15 @@ The matrix below is generated from `tests/_compat_manifest.py` by `scripts/rende
 pip install redis-rs-py
 ```
 
-Prebuilt wheels are published for Linux (x86_64, aarch64), macOS (arm64), and Windows (amd64), for both standard and free-threaded CPython 3.14.
+Prebuilt wheels are published for:
+
+- **Linux** x86_64 + aarch64 — both `manylinux` (glibc) and `musllinux` (Alpine).
+- **macOS** arm64 (Apple Silicon).
+- **Windows** x86_64.
+
+Each platform ships both standard CPython 3.14 and free-threaded CPython 3.14t wheels. An sdist is published as a fallback for unsupported platforms — it requires a Rust toolchain at install time.
+
+> **v0.1 supports CPython 3.14 only.** The cp310 floor mentioned in the original spec is deferred to v0.2; see `docs/RELEASING.md` for the rationale.
 
 ## License
 

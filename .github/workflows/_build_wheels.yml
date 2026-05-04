@@ -1,0 +1,121 @@
+# Reusable wheel-build matrix.
+#
+# Consumers: `ci.yml` (per-PR + per-push) and `publish.yml` (on tag).
+# Both invoke this workflow with the same inputs so the published
+# wheels are bit-identical to the ones CI built and tested.
+#
+# Build targets (v0.1):
+#   * Linux x86_64        manylinux + musllinux
+#   * Linux aarch64       manylinux + musllinux
+#   * macOS arm64
+#   * Windows x86_64
+#   * sdist (built once, on the Linux x86_64 leg)
+#
+# Python: cp314 + cp314t (free-threaded). Per the cp314-floor decision
+# documented in pyproject.toml.
+
+name: Build wheels (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "git ref to check out (defaults to the caller's ref)"
+        required: false
+        type: string
+        default: ""
+      build_sdist:
+        description: "whether to build the sdist on the linux-x86_64 leg"
+        required: false
+        type: boolean
+        default: true
+      artifact_prefix:
+        description: "prefix for upload-artifact names (use 'dist' for publish, 'wheels' for CI)"
+        required: false
+        type: string
+        default: "wheels"
+
+jobs:
+  build:
+    name: Build wheels (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-x86_64-manylinux
+            cibw_archs: x86_64
+            cibw_build: cp314-manylinux_x86_64 cp314t-manylinux_x86_64
+          - os: ubuntu-latest
+            label: linux-x86_64-musllinux
+            cibw_archs: x86_64
+            cibw_build: cp314-musllinux_x86_64 cp314t-musllinux_x86_64
+          - os: ubuntu-24.04-arm
+            label: linux-aarch64-manylinux
+            cibw_archs: aarch64
+            cibw_build: cp314-manylinux_aarch64 cp314t-manylinux_aarch64
+          - os: ubuntu-24.04-arm
+            label: linux-aarch64-musllinux
+            cibw_archs: aarch64
+            cibw_build: cp314-musllinux_aarch64 cp314t-musllinux_aarch64
+          - os: macos-14
+            label: macos-arm64
+            cibw_archs: arm64
+            cibw_build: cp314-macosx_arm64 cp314t-macosx_arm64
+          - os: windows-latest
+            label: windows-amd64
+            cibw_archs: AMD64
+            cibw_build: cp314-win_amd64 cp314t-win_amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v3.4
+        env:
+          CIBW_BUILD: ${{ matrix.cibw_build }}
+          CIBW_ENABLE: cpython-freethreading
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          # Linux builds run inside manylinux/musllinux containers — install Rust there.
+          CIBW_BEFORE_ALL_LINUX: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH"
+          # musllinux's default image is alpine — verify maturin can find a compiler there.
+          CIBW_MUSLLINUX_X86_64_IMAGE: musllinux_1_2
+          CIBW_MUSLLINUX_AARCH64_IMAGE: musllinux_1_2
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-${{ matrix.label }}
+          path: wheelhouse/*.whl
+
+  sdist:
+    name: Build sdist
+    if: inputs.build_sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --manifest-path crates/redis-rs-py-driver/Cargo.toml --out wheelhouse/
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.artifact_prefix }}-sdist
+          path: wheelhouse/*.tar.gz

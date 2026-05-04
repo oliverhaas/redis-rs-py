@@ -5,6 +5,11 @@ edition = "2024"
 description = "Rust I/O driver for redis-rs-py — PyO3 + tokio + redis-rs"
 license = "MIT"
 repository = "https://github.com/oliverhaas/redis-rs-py"
+# We never publish the driver crate to crates.io. It only ships as the
+# compiled extension module bundled into the redis-rs-py wheel via
+# maturin. Publishing the source crate would invite use as a Rust
+# dependency, which it isn't designed for (Python-only embedded API,
+# no semver guarantees on the Rust side).
 publish = false
 
 [lib]

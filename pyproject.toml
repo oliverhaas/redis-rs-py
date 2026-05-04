@@ -4,6 +4,15 @@ version = "0.1.0a1"
 description = "High-performance, drop-in replacement for redis-py and valkey-py, built on PyO3 + tokio + redis-rs"
 readme = "README.md"
 license = { text = "MIT" }
+# v0.1 ships cp314 + cp314t only. Rationale:
+#   * the Rust core uses 2024-edition syntax (`if let ... && ...` chains)
+#     and PyO3 0.28 free-threading APIs that exist in cp313+ only;
+#   * the Python `__init__.py`/`.pyi` tree leans on cp314 type-stub features;
+#   * dropping to cp310 (per PLAN.md's prebuilt-wheel target) is multi-day
+#     work that buys nothing concrete until users on older interpreters
+#     ask for it.
+# Revisit for v0.2 once the API surface has stabilised and there's measured
+# demand. See docs/RELEASING.md and docs/superpowers/plans/19-distribution.md.
 requires-python = ">=3.14"
 keywords = ["redis", "valkey", "rust", "pyo3", "client"]
 authors = [{ name = "Oliver Haas", email = "ohaas@e1plus.de" }]

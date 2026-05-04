@@ -73,80 +73,101 @@ jobs:
           fail_ci_if_error: false
 
   build-wheels:
-    name: Build wheels (${{ matrix.label }})
+    name: Build wheels
+    needs: [lint, test]
+    uses: ./.github/workflows/_build_wheels.yml
+    with:
+      build_sdist: false
+      artifact_prefix: wheels
+
+  smoke-test-wheel:
+    name: Smoke-test wheel (cp314 ${{ matrix.label }})
+    needs: [build-wheels]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            label: linux-x86_64
-            cibw_archs: x86_64
-            cibw_build: cp314-manylinux_x86_64 cp314t-manylinux_x86_64
-          - os: ubuntu-24.04-arm
-            label: linux-aarch64
-            cibw_archs: aarch64
-            cibw_build: cp314-manylinux_aarch64 cp314t-manylinux_aarch64
-          - os: macos-14
-            label: macos-arm64
-            cibw_archs: arm64
-            cibw_build: cp314-macosx_arm64 cp314t-macosx_arm64
-          - os: windows-latest
-            label: windows-amd64
-            cibw_archs: AMD64
-            cibw_build: cp314-win_amd64 cp314t-win_amd64
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v3.4
-        env:
-          CIBW_BUILD: ${{ matrix.cibw_build }}
-          CIBW_ENABLE: cpython-freethreading
-          CIBW_ARCHS: ${{ matrix.cibw_archs }}
-          # Linux builds run inside manylinux containers — install Rust there.
-          # macOS and Windows runners have rustup preinstalled.
-          CIBW_BEFORE_ALL_LINUX: |
-            curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          CIBW_ENVIRONMENT_LINUX: PATH="$HOME/.cargo/bin:$PATH"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: wheels-${{ matrix.label }}
-          path: wheelhouse/*.whl
-
-  smoke-test-wheel:
-    name: Smoke-test wheel (cp314 linux-x86_64)
-    needs: [build-wheels]
-    runs-on: ubuntu-latest
+          - label: linux-x86_64-manylinux
+            runs-on: ubuntu-latest
+            python: "3.14"
+            wheel_glob: "redis_rs_py-*-cp314-cp314-*manylinux*x86_64.whl"
+          - label: linux-x86_64-musllinux
+            runs-on: ubuntu-latest
+            container: alpine:3.20
+            python: "3.14"
+            wheel_glob: "redis_rs_py-*-cp314-cp314-*musllinux*x86_64.whl"
+          - label: linux-aarch64-manylinux
+            runs-on: ubuntu-24.04-arm
+            python: "3.14"
+            wheel_glob: "redis_rs_py-*-cp314-cp314-*manylinux*aarch64.whl"
+          - label: macos-arm64
+            runs-on: macos-14
+            python: "3.14"
+            wheel_glob: "redis_rs_py-*-cp314-cp314-*macosx*arm64.whl"
+          - label: windows-amd64
+            runs-on: windows-latest
+            python: "3.14"
+            wheel_glob: "redis_rs_py-*-cp314-cp314-*win_amd64.whl"
+    runs-on: ${{ matrix.runs-on }}
+    container: ${{ matrix.container || '' }}
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: wheels-linux-x86_64
+          name: wheels-${{ matrix.label }}
           path: wheelhouse
 
+      - name: Install Python (musllinux Alpine container)
+        if: matrix.label == 'linux-x86_64-musllinux'
+        run: apk add --no-cache python3=~3.14 py3-pip
+
       - name: Install uv
+        if: matrix.label != 'linux-x86_64-musllinux'
         uses: astral-sh/setup-uv@v7
 
       - name: Set up Python
-        run: uv python install 3.14
+        if: matrix.label != 'linux-x86_64-musllinux'
+        run: uv python install ${{ matrix.python }}
 
-      - name: Install wheel
+      - name: Install wheel + verify import (Alpine)
+        if: matrix.label == 'linux-x86_64-musllinux'
         run: |
-          uv venv --python 3.14
-          uv pip install --no-deps wheelhouse/redis_rs_py-*-cp314-cp314-*.whl
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --no-deps wheelhouse/${{ matrix.wheel_glob }}
+          /tmp/venv/bin/python -c "from redis_rs_py import _driver; print('OK', _driver.__version__)"
 
-      - name: Verify import
-        run: uv run --no-sync python -c "from redis_rs_py import _driver; print('OK', _driver.__version__)"
+      - name: Install wheel + verify import (non-Alpine)
+        if: matrix.label != 'linux-x86_64-musllinux'
+        shell: bash
+        run: |
+          uv venv --python ${{ matrix.python }} smoke
+          source smoke/bin/activate || smoke/Scripts/activate
+          uv pip install --no-deps wheelhouse/${{ matrix.wheel_glob }}
+          python -c "from redis_rs_py import _driver; print('OK', _driver.__version__)"
 
   smoke-test-wheel-freethreaded:
     name: Smoke-test cp314t free-threaded wheel
     needs: [build-wheels]
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64-manylinux
+            runs-on: ubuntu-latest
+            wheel_glob: "redis_rs_py-*-cp314-cp314t-*manylinux*x86_64.whl"
+          - label: linux-aarch64-manylinux
+            runs-on: ubuntu-24.04-arm
+            wheel_glob: "redis_rs_py-*-cp314-cp314t-*manylinux*aarch64.whl"
+          - label: macos-arm64
+            runs-on: macos-14
+            wheel_glob: "redis_rs_py-*-cp314-cp314t-*macosx*arm64.whl"
+          - label: windows-amd64
+            runs-on: windows-latest
+            wheel_glob: "redis_rs_py-*-cp314-cp314t-*win_amd64.whl"
+    runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: wheels-linux-x86_64
+          name: wheels-${{ matrix.label }}
           path: wheelhouse
 
       - name: Install uv
@@ -155,14 +176,13 @@ jobs:
       - name: Set up free-threaded Python
         run: uv python install 3.14t
 
-      - name: Install wheel
+      - name: Install wheel + verify FT
+        shell: bash
         run: |
-          uv venv --python 3.14t
-          uv pip install --no-deps wheelhouse/redis_rs_py-*-cp314-cp314t-*.whl
-
-      - name: Verify FT wheel imports
-        run: |
-          uv run --no-sync python -c "
+          uv venv --python 3.14t smoke
+          source smoke/bin/activate || smoke/Scripts/activate
+          uv pip install --no-deps wheelhouse/${{ matrix.wheel_glob }}
+          python -c "
           import sys
           from redis_rs_py import _driver
           assert not sys._is_gil_enabled(), 'GIL is enabled — not running on free-threaded build'
