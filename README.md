@@ -24,6 +24,262 @@ The architecture: a single Rust extension module (`_driver`) owns a tokio runtim
 
 *(Coming soon — the README will lead with benchmarks once there's something to measure. Comparison targets: `redis-py`, `redis-py[hiredis]`, `valkey-py`, `valkey-glide`.)*
 
+## Compatibility matrix
+
+The matrix below is generated from `tests/_compat_manifest.py` by `scripts/render_compat_matrix.py`. Every row is exercised by `tests/compat/test_parity.py` against both `redis-rs-py` and upstream `redis-py` running on the same Valkey instance. The pre-commit hook regenerates the matrix on every commit and fails the commit if it drifts.
+
+<!-- compat:start -->
+
+**206 commands tracked** — 185 implemented, 12 partial, 9 deferred.
+
+### Strings
+
+| Command | Method | Status | Since | Notes |
+|---|---|---|---|---|
+| `APPEND` | `append` | [*] implemented | 2.0 |  |
+| `COPY` | `copy` | [*] implemented | 6.2 |  |
+| `DECR` | `decr` | [*] implemented | 1.0 |  |
+| `DECRBY` | `decrby` | [*] implemented | 1.0 |  |
+| `DEL` | `delete` | [*] implemented | 1.0 | redis-py exposes DEL as ``delete`` |
+| `EXISTS` | `exists` | [*] implemented | 1.0 |  |
+| `GET` | `get` | [*] implemented | 1.0 |  |
+| `GETDEL` | `getdel` | [*] implemented | 6.2 |  |
+| `GETEX` | `getex` | [*] implemented | 6.2 |  |
+| `GETRANGE` | `getrange` | [*] implemented | 2.4 |  |
+| `INCR` | `incr` | [*] implemented | 1.0 |  |
+| `INCRBY` | `incrby` | [*] implemented | 1.0 |  |
+| `INCRBYFLOAT` | `incrbyfloat` | [*] implemented | 2.6 |  |
+| `MGET` | `mget` | [*] implemented | 1.0 |  |
+| `MSET` | `mset` | [*] implemented | 1.0.1 |  |
+| `MSETNX` | `msetnx` | [*] implemented | 1.0.1 |  |
+| `SET` | `set` | [*] implemented | 1.0 |  |
+| `SETRANGE` | `setrange` | [*] implemented | 2.2 |  |
+| `STRLEN` | `strlen` | [*] implemented | 2.2 |  |
+| `UNLINK` | `unlink` | [*] implemented | 4.0 |  |
+
+### Lists
+
+| Command | Method | Status | Since | Notes |
+|---|---|---|---|---|
+| `BLMOVE` | `blmove` | [*] implemented | 6.2 | uses lazy blocking conn |
+| `BLMPOP` | `blmpop` | [*] implemented | 7.0 | uses lazy blocking conn |
+| `BLPOP` | `blpop` | [*] implemented | 2.0 | uses lazy blocking conn |
+| `BRPOP` | `brpop` | [*] implemented | 2.0 | uses lazy blocking conn |
+| `BRPOPLPUSH` | `brpoplpush` | [ ] deferred | 2.2 | deprecated upstream — use BLMOVE |
+| `LINDEX` | `lindex` | [*] implemented | 1.0 |  |
+| `LINSERT` | `linsert` | [*] implemented | 2.2 |  |
+| `LLEN` | `llen` | [*] implemented | 1.0 |  |
+| `LMOVE` | `lmove` | [*] implemented | 6.2 |  |
+| `LMPOP` | `lmpop` | [*] implemented | 7.0 |  |
+| `LPOP` | `lpop` | [*] implemented | 1.0 |  |
+| `LPOS` | `lpos` | [*] implemented | 6.0.6 |  |
+| `LPUSH` | `lpush` | [*] implemented | 1.0 |  |
+| `LPUSHX` | `lpushx` | [*] implemented | 2.2 |  |
+| `LRANGE` | `lrange` | [*] implemented | 1.0 |  |
+| `LREM` | `lrem` | [*] implemented | 1.0 |  |
+| `LSET` | `lset` | [*] implemented | 1.0 |  |
+| `LTRIM` | `ltrim` | [*] implemented | 1.0 |  |
+| `RPOP` | `rpop` | [*] implemented | 1.0 |  |
+| `RPOPLPUSH` | `rpoplpush` | [ ] deferred | 1.2 | deprecated upstream — use LMOVE |
+| `RPUSH` | `rpush` | [*] implemented | 1.0 |  |
+| `RPUSHX` | `rpushx` | [*] implemented | 2.2 |  |
+
+### Hashes
+
+| Command | Method | Status | Since | Notes |
+|---|---|---|---|---|
+| `HDEL` | `hdel` | [*] implemented | 2.0 |  |
+| `HEXISTS` | `hexists` | [*] implemented | 2.0 |  |
+| `HEXPIRE` | `hexpire` | [*] implemented | 7.4 | Redis 7.4+ field TTL |
+| `HEXPIREAT` | `hexpireat` | [*] implemented | 7.4 | Redis 7.4+ |
+| `HEXPIRETIME` | `hexpiretime` | [*] implemented | 7.4 | Redis 7.4+ |
+| `HGET` | `hget` | [*] implemented | 2.0 |  |
+| `HGETALL` | `hgetall` | [*] implemented | 2.0 |  |
+| `HINCRBY` | `hincrby` | [*] implemented | 2.0 |  |
+| `HINCRBYFLOAT` | `hincrbyfloat` | [*] implemented | 2.6 |  |
+| `HKEYS` | `hkeys` | [*] implemented | 2.0 |  |
+| `HLEN` | `hlen` | [*] implemented | 2.0 |  |
+| `HMGET` | `hmget` | [*] implemented | 2.0 |  |
+| `HMSET` | `hmset` | [ ] deferred | 2.0 | deprecated upstream — use HSET with mapping |
+| `HPERSIST` | `hpersist` | [*] implemented | 7.4 | Redis 7.4+ |
+| `HPEXPIRE` | `hpexpire` | [*] implemented | 7.4 | Redis 7.4+ field TTL |
+| `HPEXPIREAT` | `hpexpireat` | [*] implemented | 7.4 | Redis 7.4+ |
+| `HPEXPIRETIME` | `hpexpiretime` | [*] implemented | 7.4 | Redis 7.4+ |
+| `HPTTL` | `hpttl` | [*] implemented | 7.4 | Redis 7.4+ |
+| `HRANDFIELD` | `hrandfield` | [*] implemented | 6.2 |  |
+| `HSCAN` | `hscan` | [*] implemented | 2.8 |  |
+| `HSET` | `hset` | [*] implemented | 2.0 |  |
+| `HSETNX` | `hsetnx` | [*] implemented | 2.0 |  |
+| `HTTL` | `httl` | [*] implemented | 7.4 | Redis 7.4+ |
+| `HVALS` | `hvals` | [*] implemented | 2.0 |  |
+
+### Sets
+
+| Command | Method | Status | Since | Notes |
+|---|---|---|---|---|
+| `SADD` | `sadd` | [*] implemented | 1.0 |  |
+| `SCARD` | `scard` | [*] implemented | 1.0 |  |
+| `SDIFF` | `sdiff` | [*] implemented | 1.0 |  |
+| `SDIFFSTORE` | `sdiffstore` | [*] implemented | 1.0 |  |
+| `SINTER` | `sinter` | [*] implemented | 1.0 |  |
+| `SINTERCARD` | `sintercard` | [*] implemented | 7.0 |  |
+| `SINTERSTORE` | `sinterstore` | [*] implemented | 1.0 |  |
+| `SISMEMBER` | `sismember` | [*] implemented | 1.0 |  |
+| `SMEMBERS` | `smembers` | [*] implemented | 1.0 |  |
+| `SMISMEMBER` | `smismember` | [*] implemented | 6.2 |  |
+| `SMOVE` | `smove` | [*] implemented | 1.0 |  |
+| `SPOP` | `spop` | [~] partial | 1.0 | result order is server-defined; verifier asserts set equality, not list equality |
+| `SRANDMEMBER` | `srandmember` | [~] partial | 1.0 | result order is server-defined; verifier asserts membership only |
+| `SREM` | `srem` | [*] implemented | 1.0 |  |
+| `SSCAN` | `sscan` | [*] implemented | 2.8 |  |
+| `SUNION` | `sunion` | [*] implemented | 1.0 |  |
+| `SUNIONSTORE` | `sunionstore` | [*] implemented | 1.0 |  |
+
+### Zsets
+
+| Command | Method | Status | Since | Notes |
+|---|---|---|---|---|
+| `BZMPOP` | `bzmpop` | [*] implemented | 7.0 | uses lazy blocking conn |
+| `BZPOPMAX` | `bzpopmax` | [*] implemented | 5.0 | uses lazy blocking conn |
+| `BZPOPMIN` | `bzpopmin` | [*] implemented | 5.0 | uses lazy blocking conn |
+| `ZADD` | `zadd` | [*] implemented | 1.2 | full NX/XX/GT/LT/CH/INCR matrix |
+| `ZCARD` | `zcard` | [*] implemented | 1.2 |  |
+| `ZCOUNT` | `zcount` | [*] implemented | 2.0 |  |
+| `ZDIFF` | `zdiff` | [*] implemented | 6.2 |  |
+| `ZDIFFSTORE` | `zdiffstore` | [*] implemented | 6.2 |  |
+| `ZINCRBY` | `zincrby` | [*] implemented | 1.2 |  |
+| `ZINTER` | `zinter` | [*] implemented | 6.2 |  |
+| `ZINTERSTORE` | `zinterstore` | [*] implemented | 2.0 |  |
+| `ZLEXCOUNT` | `zlexcount` | [*] implemented | 2.8.9 |  |
+| `ZMPOP` | `zmpop` | [*] implemented | 7.0 |  |
+| `ZMSCORE` | `zmscore` | [*] implemented | 6.2 |  |
+| `ZPOPMAX` | `zpopmax` | [*] implemented | 5.0 |  |
+| `ZPOPMIN` | `zpopmin` | [*] implemented | 5.0 |  |
+| `ZRANDMEMBER` | `zrandmember` | [~] partial | 6.2 | result is non-deterministic without WITHSCORES; verifier asserts membership |
+| `ZRANGE` | `zrange` | [*] implemented | 1.2 | BYSCORE/BYLEX/REV/LIMIT/WITHSCORES |
+| `ZRANGEBYLEX` | `zrangebylex` | [*] implemented | 2.8.9 |  |
+| `ZRANGEBYSCORE` | `zrangebyscore` | [*] implemented | 1.0.5 |  |
+| `ZRANGESTORE` | `zrangestore` | [*] implemented | 6.2 |  |
+| `ZRANK` | `zrank` | [*] implemented | 2.0 | WITHSCORE |
+| `ZREM` | `zrem` | [*] implemented | 1.2 |  |
+| `ZREMRANGEBYLEX` | `zremrangebylex` | [*] implemented | 2.8.9 |  |
+| `ZREMRANGEBYRANK` | `zremrangebyrank` | [*] implemented | 2.0 |  |
+| `ZREMRANGEBYSCORE` | `zremrangebyscore` | [*] implemented | 1.2 |  |
+| `ZREVRANGEBYLEX` | `zrevrangebylex` | [*] implemented | 2.8.9 |  |
+| `ZREVRANGEBYSCORE` | `zrevrangebyscore` | [*] implemented | 2.2 |  |
+| `ZREVRANK` | `zrevrank` | [*] implemented | 2.0 | WITHSCORE |
+| `ZSCAN` | `zscan` | [*] implemented | 2.8 |  |
+| `ZSCORE` | `zscore` | [*] implemented | 1.2 |  |
+| `ZUNION` | `zunion` | [*] implemented | 6.2 |  |
+| `ZUNIONSTORE` | `zunionstore` | [*] implemented | 2.0 |  |
+
+### Streams
+
+| Command | Method | Status | Since | Notes |
+|---|---|---|---|---|
+| `XACK` | `xack` | [*] implemented | 5.0 |  |
+| `XADD` | `xadd` | [*] implemented | 5.0 | NOMKSTREAM/MAXLEN/MINID/LIMIT/~ |
+| `XAUTOCLAIM` | `xautoclaim` | [*] implemented | 6.2 |  |
+| `XCLAIM` | `xclaim` | [*] implemented | 5.0 |  |
+| `XDEL` | `xdel` | [*] implemented | 5.0 |  |
+| `XGROUP CREATE` | `xgroup_create` | [*] implemented | 5.0 |  |
+| `XGROUP CREATECONSUMER` | `xgroup_createconsumer` | [*] implemented | 6.2 |  |
+| `XGROUP DELCONSUMER` | `xgroup_delconsumer` | [*] implemented | 5.0 |  |
+| `XGROUP DESTROY` | `xgroup_destroy` | [*] implemented | 5.0 |  |
+| `XGROUP SETID` | `xgroup_setid` | [*] implemented | 5.0 |  |
+| `XINFO CONSUMERS` | `xinfo_consumers` | [*] implemented | 5.0 |  |
+| `XINFO GROUPS` | `xinfo_groups` | [*] implemented | 5.0 |  |
+| `XINFO STREAM` | `xinfo_stream` | [*] implemented | 5.0 |  |
+| `XLEN` | `xlen` | [*] implemented | 5.0 |  |
+| `XPENDING` | `xpending` | [*] implemented | 5.0 | summary + range forms |
+| `XRANGE` | `xrange` | [*] implemented | 5.0 |  |
+| `XREAD` | `xread` | [*] implemented | 5.0 | BLOCK + COUNT |
+| `XREADGROUP` | `xreadgroup` | [*] implemented | 5.0 | BLOCK + COUNT + NOACK |
+| `XREVRANGE` | `xrevrange` | [*] implemented | 5.0 |  |
+| `XSETID` | `xsetid` | [*] implemented | 5.0 |  |
+| `XTRIM` | `xtrim` | [*] implemented | 5.0 | MAXLEN/MINID/~ |
+
+### Scripts
+
+| Command | Method | Status | Since | Notes |
+|---|---|---|---|---|
+| `EVAL` | `eval` | [*] implemented | 2.6 |  |
+| `EVALSHA` | `evalsha` | [*] implemented | 2.6 |  |
+| `EVALSHA_RO` | `evalsha_ro` | [*] implemented | 7.0 |  |
+| `EVAL_RO` | `eval_ro` | [*] implemented | 7.0 |  |
+| `FCALL` | `fcall` | [*] implemented | 7.0 |  |
+| `FCALL_RO` | `fcall_ro` | [*] implemented | 7.0 |  |
+| `FUNCTION DUMP` | `function_dump` | [*] implemented | 7.0 |  |
+| `FUNCTION FLUSH` | `function_flush` | [*] implemented | 7.0 |  |
+| `FUNCTION KILL` | `function_kill` | [*] implemented | 7.0 |  |
+| `FUNCTION LIST` | `function_list` | [*] implemented | 7.0 |  |
+| `FUNCTION LOAD` | `function_load` | [*] implemented | 7.0 |  |
+| `FUNCTION STATS` | `function_stats` | [*] implemented | 7.0 |  |
+| `SCRIPT EXISTS` | `script_exists` | [*] implemented | 2.6 |  |
+| `SCRIPT FLUSH` | `script_flush` | [*] implemented | 2.6 |  |
+| `SCRIPT LOAD` | `script_load` | [*] implemented | 2.6 |  |
+| `register_script` | `register_script` | [ ] deferred | 2.6 | v0.1: use SCRIPT LOAD + EVALSHA directly |
+
+### Admin
+
+| Command | Method | Status | Since | Notes |
+|---|---|---|---|---|
+| `BGREWRITEAOF` | `bgrewriteaof` | [*] implemented | 1.0 |  |
+| `BGSAVE` | `bgsave` | [*] implemented | 1.0 |  |
+| `CLIENT GETNAME` | `client_getname` | [*] implemented | 2.6.9 |  |
+| `CLIENT ID` | `client_id` | [~] partial | 5.0 | ID values differ across clients; verifier asserts type only |
+| `CLIENT INFO` | `client_info` | [~] partial | 6.2 | shape parity; values differ across clients |
+| `CLIENT KILL` | `client_kill` | [*] implemented | 2.4 |  |
+| `CLIENT LIST` | `client_list` | [~] partial | 2.4 | shape parity; values differ across clients |
+| `CLIENT NO-EVICT` | `client_no_evict` | [*] implemented | 7.0 |  |
+| `CLIENT NO-TOUCH` | `client_no_touch` | [*] implemented | 7.2 |  |
+| `CLIENT PAUSE` | `client_pause` | [*] implemented | 3.0 |  |
+| `CLIENT SETNAME` | `client_setname` | [*] implemented | 2.6.9 |  |
+| `CLIENT TRACKING` | `client_tracking` | [ ] deferred | 6.0 | v0.2 — caching is configured in Rust, not via this command |
+| `CLIENT UNPAUSE` | `client_unpause` | [*] implemented | 6.2 |  |
+| `CONFIG GET` | `config_get` | [*] implemented | 2.0 |  |
+| `CONFIG RESETSTAT` | `config_resetstat` | [*] implemented | 2.0 |  |
+| `CONFIG REWRITE` | `config_rewrite` | [ ] deferred | 2.8 | requires writable redis.conf — not exercised in CI |
+| `CONFIG SET` | `config_set` | [*] implemented | 2.0 |  |
+| `DBSIZE` | `dbsize` | [*] implemented | 1.0 |  |
+| `DEBUG SLEEP` | `debug_sleep` | [ ] deferred | 1.0 | test-only helper, not part of redis-py public surface |
+| `DUMP` | `dump` | [*] implemented | 2.6 |  |
+| `ECHO` | `echo` | [*] implemented | 1.0 |  |
+| `EXPIRE` | `expire` | [*] implemented | 1.0 | NX/XX/GT/LT flags |
+| `EXPIREAT` | `expireat` | [*] implemented | 1.2 |  |
+| `EXPIRETIME` | `expiretime` | [*] implemented | 7.0 |  |
+| `FLUSHALL` | `flushall` | [*] implemented | 1.0 |  |
+| `FLUSHDB` | `flushdb` | [*] implemented | 1.0 |  |
+| `INFO` | `info` | [~] partial | 1.0 | values like ``uptime_in_seconds`` differ between calls; verifier asserts shape + key presence |
+| `KEYS` | `keys` | [*] implemented | 1.0 |  |
+| `LASTSAVE` | `lastsave` | [~] partial | 1.0 | wall-clock dependent; verifier asserts type only |
+| `LATENCY HISTORY` | `latency_history` | [ ] deferred | 2.8.13 | v0.2 |
+| `MEMORY USAGE` | `memory_usage` | [*] implemented | 4.0 |  |
+| `MONITOR` | `monitor` | [ ] deferred | 1.0 | v0.2; rarely used in production |
+| `OBJECT ENCODING` | `object_encoding` | [*] implemented | 2.2.3 |  |
+| `OBJECT FREQ` | `object_freq` | [~] partial | 4.0 | requires LFU policy; skipped under default config |
+| `OBJECT IDLETIME` | `object_idletime` | [~] partial | 2.2.3 | wall-clock dependent; verifier asserts non-negative int |
+| `OBJECT REFCOUNT` | `object_refcount` | [*] implemented | 2.2.3 |  |
+| `PERSIST` | `persist` | [*] implemented | 2.2 |  |
+| `PEXPIRE` | `pexpire` | [*] implemented | 2.6 |  |
+| `PEXPIREAT` | `pexpireat` | [*] implemented | 2.6 |  |
+| `PEXPIRETIME` | `pexpiretime` | [*] implemented | 7.0 |  |
+| `PING` | `ping` | [*] implemented | 1.0 |  |
+| `PTTL` | `pttl` | [*] implemented | 2.6 |  |
+| `RANDOMKEY` | `randomkey` | [~] partial | 1.0 | result depends on keyspace; verifier asserts membership |
+| `RENAME` | `rename` | [*] implemented | 1.0 |  |
+| `RENAMENX` | `renamenx` | [*] implemented | 1.0 |  |
+| `RESTORE` | `restore` | [*] implemented | 2.6 |  |
+| `SCAN` | `scan` | [*] implemented | 2.8 |  |
+| `SCAN_ITER` | `scan_iter` | [*] implemented | 2.8 | iterator wrapper |
+| `TIME` | `time` | [~] partial | 2.6 | wall-clock dependent; verifier asserts shape (sec, usec) |
+| `TTL` | `ttl` | [*] implemented | 1.0 |  |
+| `TYPE` | `type` | [*] implemented | 1.0 |  |
+| `WAIT` | `wait` | [*] implemented | 3.0 |  |
+| `WAITAOF` | `waitaof` | [*] implemented | 7.2 |  |
+
+<!-- compat:end -->
+
 ## Installation
 
 ```console
