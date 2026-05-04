@@ -1,6 +1,7 @@
-// Façade module — declares submodules implemented across plans 10-14.
+// Façade module — declares submodules implemented across plans 10-15.
 
 pub mod asyncio_mod;
+pub mod cluster;
 pub mod decode;
 pub mod kwargs;
 pub mod pipeline;

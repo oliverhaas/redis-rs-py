@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use redis::aio::{ConnectionManager, ConnectionManagerConfig};
 use redis::caching::CacheConfig;
+use redis::cluster::ClusterClient;
+use redis::cluster_async::ClusterConnection;
 use redis::{Client, RedisResult};
 use tokio::sync::OnceCell;
 
@@ -47,11 +49,16 @@ enum ConnConfig {
         url: Arc<str>,
         tls_opts: Option<TlsOpts>,
     },
+    Cluster {
+        urls: Arc<[String]>,
+        tls_opts: Option<TlsOpts>,
+    },
 }
 
 #[derive(Clone)]
 pub enum ValkeyConnInner {
     Standard(ConnectionManager),
+    Cluster(ClusterConnection),
 }
 
 #[derive(Clone)]
@@ -88,6 +95,8 @@ impl ValkeyConn {
     pub fn cache_statistics(&self) -> Option<redis::caching::CacheStatistics> {
         match &self.regular {
             ValkeyConnInner::Standard(c) => c.get_cache_statistics(),
+            // redis-rs cluster_async has no CacheConfig hook.
+            ValkeyConnInner::Cluster(_) => None,
         }
     }
 
@@ -146,7 +155,21 @@ impl ValkeyConn {
             ConnConfig::Standard { url, tls_opts } => {
                 create_client(url, tls_opts.as_ref()).map_err(|e| e.to_string())
             }
+            ConnConfig::Cluster { urls, tls_opts } => {
+                // Use the first startup node for the pubsub client URL.
+                let url = urls
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("redis://127.0.0.1");
+                create_client(url, tls_opts.as_ref()).map_err(|e| e.to_string())
+            }
         }
+    }
+
+    /// True if this is a cluster connection.
+    #[allow(dead_code)]
+    pub fn is_cluster(&self) -> bool {
+        matches!(self.regular, ValkeyConnInner::Cluster(_))
     }
 }
 
@@ -224,6 +247,41 @@ pub async fn connect_standard(
     })
 }
 
+/// Connect to a Valkey/Redis cluster across `urls` startup nodes.
+///
+/// Client-side caching is **not** supported in cluster mode (redis-rs
+/// cluster_async has no CacheConfig hook); pass-through cache opts are
+/// silently ignored at this layer — the façade emits a one-shot warning
+/// when the user actually passes `cache_max_size` / `cache_ttl_secs`.
+pub async fn connect_cluster(
+    urls: Vec<String>,
+    tls_opts: Option<TlsOpts>,
+) -> Result<ValkeyConn, String> {
+    if urls.is_empty() {
+        return Err("connect_cluster: at least one startup URL required".into());
+    }
+    let url_refs: Vec<&str> = urls.iter().map(|s| s.as_str()).collect();
+    let client = match &tls_opts {
+        Some(opts) => ClusterClient::builder(url_refs)
+            .certs(opts.to_tls_certs())
+            .build(),
+        None => ClusterClient::new(url_refs),
+    }
+    .map_err(|e| format!("Invalid cluster URLs: {e}"))?;
+    let conn = client
+        .get_async_connection()
+        .await
+        .map_err(|e| format!("Cluster connection failed: {e}"))?;
+    Ok(ValkeyConn {
+        regular: ValkeyConnInner::Cluster(conn),
+        blocking: Arc::new(OnceCell::new()),
+        config: ConnConfig::Cluster {
+            urls: Arc::from(urls),
+            tls_opts,
+        },
+    })
+}
+
 async fn build_blocking(cfg: &ConnConfig) -> RedisResult<ValkeyConnInner> {
     match cfg {
         ConnConfig::Standard { url, tls_opts } => {
@@ -231,6 +289,17 @@ async fn build_blocking(cfg: &ConnConfig) -> RedisResult<ValkeyConnInner> {
             let cfg = blocking_conn_manager_config();
             let mgr = ConnectionManager::new_with_config(client, cfg).await?;
             Ok(ValkeyConnInner::Standard(mgr))
+        }
+        ConnConfig::Cluster { urls, tls_opts } => {
+            let url_refs: Vec<&str> = urls.iter().map(|s| s.as_str()).collect();
+            let client = match tls_opts {
+                Some(opts) => ClusterClient::builder(url_refs)
+                    .certs(opts.to_tls_certs())
+                    .build()?,
+                None => ClusterClient::new(url_refs)?,
+            };
+            let conn = client.get_async_connection().await?;
+            Ok(ValkeyConnInner::Cluster(conn))
         }
     }
 }
@@ -245,6 +314,7 @@ macro_rules! dispatch_cmd {
     ($self:expr, $cmd:expr) => {
         match $self {
             $crate::connection::ValkeyConnInner::Standard(c) => $cmd.query_async(c).await,
+            $crate::connection::ValkeyConnInner::Cluster(c) => $cmd.query_async(c).await,
         }
     };
 }
@@ -255,6 +325,7 @@ macro_rules! conn_method {
     ($self:expr, $c:ident, $op:expr) => {
         match $self {
             $crate::connection::ValkeyConnInner::Standard($c) => $op.await,
+            $crate::connection::ValkeyConnInner::Cluster($c) => $op.await,
         }
     };
 }
@@ -773,6 +844,20 @@ impl ValkeyConn {
                     .map_err(|e| e.to_string())?;
                 Ok(ReservedConnection::new(conn))
             }
+            ConnConfig::Cluster { urls, tls_opts } => {
+                // WATCH / MULTI / EXEC across slots is not supported in cluster mode.
+                // Provide a single-node connection to the first startup node.
+                let url = urls
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("redis://127.0.0.1");
+                let client = create_client(url, tls_opts.as_ref()).map_err(|e| e.to_string())?;
+                let conn = client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(ReservedConnection::new(conn))
+            }
         }
     }
 }
@@ -791,6 +876,19 @@ impl ValkeyConnInner {
                 if transaction {
                     pipe.atomic();
                 }
+                for (cmd_name, args) in &commands {
+                    let mut cmd = redis::cmd(cmd_name);
+                    for a in args {
+                        cmd.arg(a.as_slice());
+                    }
+                    pipe.add_command(cmd);
+                }
+                pipe.query_async(c).await
+            }
+            Self::Cluster(c) => {
+                // Cluster pipelines do not support MULTI/EXEC across slots.
+                // We fall back to sequential dispatch.
+                let mut pipe = redis::pipe();
                 for (cmd_name, args) in &commands {
                     let mut cmd = redis::cmd(cmd_name);
                     for a in args {

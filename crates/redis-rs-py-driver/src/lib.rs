@@ -49,6 +49,12 @@ fn _driver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     facade::asyncio_mod::register(m.py(), &asyncio_mod)?;
     m.add_submodule(&asyncio_mod)?;
 
+    // cluster submodule — redis_rs_py._driver.cluster
+    facade::cluster::register_sync(m.py(), m)?;
+
+    // async cluster submodule — redis_rs_py._driver.asyncio.cluster
+    facade::cluster::register_async(m.py(), &asyncio_mod)?;
+
     // PyO3 0.28: submodules are NOT auto-added to sys.modules. Do it
     // manually so `from redis_rs_py._driver.asyncio import Redis` and
     // dotted import paths work.

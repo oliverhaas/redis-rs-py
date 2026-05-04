@@ -3,11 +3,17 @@
 We use testcontainers to bring up a single shared Valkey instance per
 pytest session. The `valkey_url` fixture is xdist-safe: the worker that
 wins the race owns the container; other workers wait on a sidecar file.
+
+Cluster fixtures (Plan 15) spawn a 3-master/3-replica Valkey cluster using
+six standalone containers wired with CLUSTER MEET/ADDSLOTS/REPLICATE.
+They are gated behind REDIS_RS_PY_CLUSTER_TESTS=1 to avoid slowing down
+the regular CI loop.
 """
 
 from __future__ import annotations
 
 import os
+import time
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -185,3 +191,205 @@ def redis_py_client(valkey_url: str):
     rp = redis.Redis.from_url(valkey_url, decode_responses=False)
     yield rp
     rp.close()
+
+
+# =============================================================================
+# Cluster fixtures (Plan 15) — gated behind REDIS_RS_PY_CLUSTER_TESTS=1
+# =============================================================================
+#
+# Spins six standalone Valkey containers on a shared docker network, wires
+# them into a 3-master/3-replica cluster, and yields the three master URLs.
+# The setup can take 30-90 seconds on first run; subsequent pytest-xdist
+# workers share a single cluster via the file-lock + sidecar pattern.
+#
+# Set REDIS_RS_PY_CLUSTER_TESTS=1 to enable. Without it all cluster tests
+# are skipped automatically.
+
+_CLUSTER_ENABLED = os.environ.get("REDIS_RS_PY_CLUSTER_TESTS", "0") == "1"
+_CLUSTER_NODE_COUNT = 6  # 3 masters + 3 replicas
+_CLUSTER_SLOT_TOTAL = 16384
+_CLUSTER_PINNED_CONTAINERS: list[DockerContainer] = []
+
+
+def _cluster_command(container: DockerContainer, *args: str) -> str:
+    """Run valkey-cli inside a container and return trimmed stdout."""
+    cmd = ["valkey-cli", "-p", "6379", *args]
+    rc, out = container.exec(cmd)
+    if rc != 0:
+        raise RuntimeError(f"valkey-cli {args} failed (rc={rc}): {out!r}")
+    return out.decode().strip() if isinstance(out, (bytes, bytearray)) else out.strip()
+
+
+def _container_ip(container: DockerContainer, network_name: str) -> str:
+    """Return the container's IP on the given network."""
+    import docker as docker_sdk
+
+    client = docker_sdk.from_env()
+    container_id = container._container.id  # noqa: SLF001
+    info = client.containers.get(container_id)
+    nets = info.attrs["NetworkSettings"]["Networks"]
+    # Try exact name first, then any network
+    for name, data in nets.items():
+        if name == network_name or network_name in name:
+            return data["IPAddress"]
+    # fallback: first network
+    for data in nets.values():
+        if data.get("IPAddress"):
+            return data["IPAddress"]
+    raise RuntimeError(f"Could not find IP for container {container_id!r}")
+
+
+def _spawn_cluster() -> tuple[object, list[DockerContainer], list[str]]:  # noqa: C901, PLR0912
+    """Bring up a 3-master/3-replica cluster. Returns (network, containers, master_urls)."""
+    from testcontainers.core.network import Network
+
+    network = Network()
+    network.create()
+    network_name: str = network._network.name  # type: ignore[attr-defined]  # noqa: SLF001
+
+    containers: list[DockerContainer] = []
+    for idx in range(_CLUSTER_NODE_COUNT):
+        name = f"valkey-cluster-node-{idx}"
+        c = (
+            DockerContainer(VALKEY_IMAGE)
+            .with_network(network)
+            .with_name(name)
+            .with_exposed_ports(6379)
+            .with_command(
+                "valkey-server "
+                "--cluster-enabled yes "
+                "--cluster-node-timeout 5000 "
+                "--appendonly yes "
+                '--save "" '
+                "--protected-mode no "
+                "--port 6379",
+            )
+        )
+        c.start()
+        wait_for_logs(c, "Ready to accept connections", timeout=30)
+        containers.append(c)
+
+    # Collect internal IPs — Valkey CLUSTER MEET requires IP, not hostname.
+    container_ips = [_container_ip(c, network_name) for c in containers]
+
+    # Step A: CLUSTER MEET — point node 0 at every other node via IP.
+    for idx in range(1, _CLUSTER_NODE_COUNT):
+        _cluster_command(containers[0], "CLUSTER", "MEET", container_ips[idx], "6379")
+
+    # Wait for topology propagation.
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        info = _cluster_command(containers[0], "CLUSTER", "INFO")
+        nodes = _cluster_command(containers[0], "CLUSTER", "NODES").splitlines()
+        if "cluster_known_nodes:6" in info and len(nodes) == _CLUSTER_NODE_COUNT:
+            break
+        time.sleep(0.5)
+    else:
+        raise RuntimeError("Cluster topology did not propagate within 20s")
+
+    # Step B: ADDSLOTS — partition 16384 slots across the 3 masters.
+    masters = containers[:3]
+    replicas = containers[3:]
+    slots_per_master = _CLUSTER_SLOT_TOTAL // 3
+    cursor = 0
+    for m_idx, master in enumerate(masters):
+        end = cursor + slots_per_master + (1 if m_idx == len(masters) - 1 else 0)
+        _cluster_command(master, "CLUSTER", "ADDSLOTSRANGE", str(cursor), str(end - 1))
+        cursor = end
+
+    # Step C: CLUSTER REPLICATE — attach each replica to a master.
+    master_ids = [_cluster_command(m, "CLUSTER", "MYID") for m in masters]
+
+    for r_idx, replica in enumerate(replicas):
+        master_id = master_ids[r_idx]
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            nodes = _cluster_command(replica, "CLUSTER", "NODES")
+            if master_id in nodes:
+                break
+            time.sleep(0.3)
+        else:
+            raise RuntimeError(f"Replica {r_idx} could not see master {master_id} within 10s")
+        _cluster_command(replica, "CLUSTER", "REPLICATE", master_id)
+
+    # Step D: wait until cluster_state:ok.
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        info = _cluster_command(containers[0], "CLUSTER", "INFO")
+        if "cluster_state:ok" in info:
+            break
+        time.sleep(0.5)
+    else:
+        raise RuntimeError("cluster_state never reached ok")
+
+    # Step E: collect host-mapped URLs for the three masters.
+    master_urls: list[str] = []
+    for master in masters:
+        host = master.get_container_host_ip()
+        port = master.get_exposed_port(6379)
+        master_urls.append(f"redis://{host}:{port}")
+
+    return network, containers, master_urls
+
+
+@pytest.fixture(scope="session")
+def cluster_urls(
+    tmp_path_factory: pytest.TempPathFactory,
+    worker_id: str,
+) -> Iterator[list[str]]:
+    """List of redis://host:port URLs for the 3 cluster masters.
+
+    Skipped if REDIS_RS_PY_CLUSTER_TESTS != 1.
+    """
+    if not _CLUSTER_ENABLED:
+        pytest.skip("Cluster tests disabled. Set REDIS_RS_PY_CLUSTER_TESTS=1 to enable.")
+
+    if worker_id == "master":
+        network, containers, urls = _spawn_cluster()
+        try:
+            yield urls
+        finally:
+            for c in containers:
+                c.stop()
+            network.remove()
+        return
+
+    root = tmp_path_factory.getbasetemp().parent
+    lockfile = root / "valkey_cluster.lock"
+    urlsfile = root / "valkey_cluster.urls"
+
+    network = None
+    containers_owned: list[DockerContainer] = []
+
+    with FileLock(str(lockfile)):
+        if urlsfile.exists():
+            urls = urlsfile.read_text().strip().splitlines()
+        else:
+            network, containers_owned, urls = _spawn_cluster()
+            urlsfile.write_text("\n".join(urls))
+            _CLUSTER_PINNED_CONTAINERS.extend(containers_owned)
+
+    try:
+        yield urls
+    finally:
+        if containers_owned:
+            for c in containers_owned:
+                c.stop()
+            if network is not None:
+                network.remove()
+            urlsfile.unlink(missing_ok=True)
+
+
+@pytest.fixture
+def cluster_client_sync(cluster_urls: list[str]):
+    """Upstream redis-py cluster client used to FLUSHALL between tests."""
+    import redis as upstream_redis
+
+    nodes = []
+    for url in cluster_urls:
+        host, port = url.removeprefix("redis://").split(":", 1)
+        nodes.append(upstream_redis.cluster.ClusterNode(host=host, port=int(port)))
+    rc = upstream_redis.cluster.RedisCluster(startup_nodes=nodes)
+    rc.flushall()
+    yield rc
+    rc.close()

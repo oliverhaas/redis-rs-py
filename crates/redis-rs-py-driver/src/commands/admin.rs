@@ -1406,3 +1406,121 @@ impl AsyncRedis {
         })
     }
 }
+
+// =========================================================================
+// Cluster admin commands on ValkeyConnInner (Plan 15)
+// =========================================================================
+
+impl crate::connection::ValkeyConnInner {
+    pub async fn cluster_info(&mut self) -> redis::RedisResult<Vec<u8>> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("INFO");
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_nodes(&mut self) -> redis::RedisResult<Vec<u8>> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("NODES");
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_slots(&mut self) -> redis::RedisResult<redis::Value> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("SLOTS");
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_shards(&mut self) -> redis::RedisResult<redis::Value> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("SHARDS");
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_myid(&mut self) -> redis::RedisResult<String> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("MYID");
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_myshardid(&mut self) -> redis::RedisResult<String> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("MYSHARDID");
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_keyslot(&mut self, key: &str) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("KEYSLOT").arg(key);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_countkeysinslot(&mut self, slot: u16) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("COUNTKEYSINSLOT").arg(slot);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_getkeysinslot(
+        &mut self,
+        slot: u16,
+        count: u32,
+    ) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("GETKEYSINSLOT").arg(slot).arg(count);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_meet(&mut self, ip: &str, port: u16) -> redis::RedisResult<()> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("MEET").arg(ip).arg(port);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_forget(&mut self, node_id: &str) -> redis::RedisResult<()> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("FORGET").arg(node_id);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_replicate(&mut self, node_id: &str) -> redis::RedisResult<()> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("REPLICATE").arg(node_id);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_reset(&mut self, hard: bool) -> redis::RedisResult<()> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("RESET").arg(if hard { "HARD" } else { "SOFT" });
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_count_failure_reports(
+        &mut self,
+        node_id: &str,
+    ) -> redis::RedisResult<i64> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("COUNT-FAILURE-REPORTS").arg(node_id);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_failover(&mut self, option: Option<&str>) -> redis::RedisResult<()> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("FAILOVER");
+        if let Some(opt) = option {
+            cmd.arg(opt);
+        }
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_replicas(&mut self, node_id: &str) -> redis::RedisResult<Vec<Vec<u8>>> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("REPLICAS").arg(node_id);
+        crate::dispatch_cmd!(self, cmd)
+    }
+
+    pub async fn cluster_links(&mut self) -> redis::RedisResult<redis::Value> {
+        let mut cmd = redis::cmd("CLUSTER");
+        cmd.arg("LINKS");
+        crate::dispatch_cmd!(self, cmd)
+    }
+}
