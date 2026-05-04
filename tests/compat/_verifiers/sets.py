@@ -4,8 +4,6 @@ Many set commands return server-defined-order results — the verifiers
 normalise to ``set(...)`` before comparing.
 """
 
-from __future__ import annotations
-
 from . import verifier
 
 

@@ -1,7 +1,5 @@
 """Tests for Redis lifecycle: close(), context-manager, post-close behaviour."""
 
-from __future__ import annotations
-
 import pytest
 
 

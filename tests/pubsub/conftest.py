@@ -5,8 +5,6 @@ can prove our PubSub receives messages without bootstrapping our own
 publish path.
 """
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 import pytest

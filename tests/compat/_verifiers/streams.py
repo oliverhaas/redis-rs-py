@@ -4,8 +4,6 @@ Stream IDs are server-assigned timestamps; the verifiers seed via
 ``xadd`` then read what they wrote, comparing shapes.
 """
 
-from __future__ import annotations
-
 from . import verifier
 
 

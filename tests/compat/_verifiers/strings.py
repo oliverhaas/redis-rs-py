@@ -1,7 +1,5 @@
 """Verifiers for the strings command family."""
 
-from __future__ import annotations
-
 from . import verifier
 
 

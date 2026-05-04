@@ -1,7 +1,5 @@
 """Tests for Redis.from_url() URL parsing."""
 
-from __future__ import annotations
-
 import pytest
 
 

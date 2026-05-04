@@ -24,8 +24,6 @@ Conventions for verifier authors:
   that's a pass; use ``_assert_same_error`` for that case.
 """
 
-from __future__ import annotations
-
 from collections.abc import Callable
 from typing import Final
 

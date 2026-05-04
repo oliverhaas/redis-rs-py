@@ -10,8 +10,6 @@ They are gated behind REDIS_RS_PY_CLUSTER_TESTS=1 to avoid slowing down
 the regular CI loop.
 """
 
-from __future__ import annotations
-
 import os
 import time
 from typing import TYPE_CHECKING, Any

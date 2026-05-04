@@ -1,7 +1,5 @@
 """Smoke tests for every asyncio façade command method."""
 
-from __future__ import annotations
-
 import pytest
 from redis_rs_py.asyncio import Redis
 

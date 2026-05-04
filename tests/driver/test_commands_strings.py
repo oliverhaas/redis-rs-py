@@ -1,7 +1,5 @@
 """String command tests for Redis/AsyncRedis — Plan 03."""
 
-from __future__ import annotations
-
 import time
 
 import pytest

@@ -1,7 +1,5 @@
 """ar.atransaction() retry helper tests."""
 
-from __future__ import annotations
-
 import asyncio
 
 import pytest

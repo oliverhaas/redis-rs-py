@@ -1,7 +1,5 @@
 """Sentinel client — drop-in replacement for redis.sentinel.Sentinel."""
 
-from __future__ import annotations
-
 import sys
 
 import redis_rs_py._driver  # noqa: F401

@@ -10,8 +10,6 @@ is registered (which would also fail the verifier-registration smoke
 check, so we never expect this in CI).
 """
 
-from __future__ import annotations
-
 import pytest
 
 from tests._compat_manifest import ManifestEntry, by_status

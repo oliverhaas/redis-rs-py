@@ -1,7 +1,5 @@
 """Async lifecycle: aclose + __aenter__/__aexit__."""
 
-from __future__ import annotations
-
 import pytest
 from redis_rs_py.asyncio import Redis
 

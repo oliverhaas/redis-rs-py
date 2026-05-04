@@ -1,7 +1,5 @@
 """Constructor surface for redis_rs_py.asyncio.Redis."""
 
-from __future__ import annotations
-
 import pytest
 from redis_rs_py.asyncio import Redis
 

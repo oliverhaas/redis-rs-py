@@ -3,8 +3,6 @@ the same verifier registry, but its verifier asserts only the relaxed
 invariants documented in the entry's ``notes`` field.
 """
 
-from __future__ import annotations
-
 import pytest
 
 from tests._compat_manifest import ManifestEntry, by_status

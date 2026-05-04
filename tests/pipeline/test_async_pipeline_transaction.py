@@ -1,7 +1,5 @@
 """Async pipeline MULTI/EXEC atomic block tests."""
 
-from __future__ import annotations
-
 import pytest
 
 

@@ -10,8 +10,6 @@ The block lives between two HTML comment markers in README.md. Anything
 between the markers is regenerated; anything outside is left alone.
 """
 
-from __future__ import annotations
-
 import argparse
 import sys
 from collections import defaultdict

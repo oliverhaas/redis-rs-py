@@ -1,7 +1,5 @@
 """RedisCluster constructor + smoke commands."""
 
-from __future__ import annotations
-
 import pytest
 from redis_rs_py.cluster import ClusterNode, RedisCluster
 

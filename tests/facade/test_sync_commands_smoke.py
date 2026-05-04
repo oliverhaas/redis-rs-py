@@ -1,7 +1,5 @@
 """Smoke tests: every command family fires at least one live round-trip."""
 
-from __future__ import annotations
-
 import pytest
 
 

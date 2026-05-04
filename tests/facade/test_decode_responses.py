@@ -8,8 +8,6 @@ Tests use the live Valkey fixture.  Both the sync (Redis) and async
 (asyncio.Redis) facades are exercised.
 """
 
-from __future__ import annotations
-
 import asyncio
 
 import pytest

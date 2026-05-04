@@ -22,8 +22,6 @@ BGREWRITEAOF, SCRIPT FLUSH, FUNCTION FLUSH) operate on server-global state
 tests ensures all global-state operations serialize onto one worker.
 """
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 import pytest

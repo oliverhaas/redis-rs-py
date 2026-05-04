@@ -1,7 +1,5 @@
 """Verifiers for the lists command family."""
 
-from __future__ import annotations
-
 from . import verifier
 
 

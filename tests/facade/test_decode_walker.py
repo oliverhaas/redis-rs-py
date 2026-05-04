@@ -4,8 +4,6 @@ These tests exercise the recursive walker directly without going through any
 Redis command, so they require no live server.
 """
 
-from __future__ import annotations
-
 import pytest
 
 

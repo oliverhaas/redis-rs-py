@@ -1,7 +1,5 @@
 """List command tests — covers the full Plan 04 surface."""
 
-from __future__ import annotations
-
 import time
 
 import pytest

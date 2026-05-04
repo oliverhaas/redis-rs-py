@@ -1,7 +1,5 @@
 """Pipeline MULTI/EXEC atomic block tests."""
 
-from __future__ import annotations
-
 
 def test_pipeline_transaction_true_is_atomic(client) -> None:
     """pipeline(transaction=True) wraps commands in MULTI/EXEC."""

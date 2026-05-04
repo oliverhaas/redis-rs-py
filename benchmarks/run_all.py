@@ -9,8 +9,6 @@ gate-on-PR run; the full nightly run uses pyperf's defaults
 (``--rigorous --processes 5``).
 """
 
-from __future__ import annotations
-
 import argparse
 import datetime as dt
 import json

@@ -3,8 +3,6 @@
 Gated behind REDIS_RS_PY_SENTINEL_TESTS=1.
 """
 
-from __future__ import annotations
-
 import pytest
 
 

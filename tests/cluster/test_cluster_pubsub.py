@@ -1,7 +1,5 @@
 """ClusterPubSub stub — minimal API surface tests."""
 
-from __future__ import annotations
-
 import pytest
 from redis_rs_py.cluster import RedisCluster
 

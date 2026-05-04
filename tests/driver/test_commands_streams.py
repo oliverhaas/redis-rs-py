@@ -1,7 +1,5 @@
 """Stream commands — parity with redis-py output shapes."""
 
-from __future__ import annotations
-
 import threading
 import time
 

@@ -1,7 +1,5 @@
 """Set command coverage on Redis/AsyncRedis — Plan 06."""
 
-from __future__ import annotations
-
 import pytest
 
 # --- SADD ----------------------------------------------------------------

@@ -1,7 +1,5 @@
 """ValkeyConnInner::Cluster and connect_cluster end-to-end smoke tests."""
 
-from __future__ import annotations
-
 
 def test_cluster_fixture_brings_up_three_masters(cluster_urls: list[str]) -> None:
     assert len(cluster_urls) == 3

@@ -1,7 +1,5 @@
 """Tests for the accept-and-warn behaviour on unknown / unimplemented kwargs."""
 
-from __future__ import annotations
-
 import warnings
 
 import pytest

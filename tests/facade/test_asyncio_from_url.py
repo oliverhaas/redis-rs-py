@@ -1,7 +1,5 @@
 """asyncio.Redis.from_url URL parsing."""
 
-from __future__ import annotations
-
 import pytest
 from redis_rs_py.asyncio import Redis
 from redis_rs_py.exceptions import ConnectionError as RedisConnectionError

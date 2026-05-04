@@ -1,7 +1,5 @@
 """Hash command coverage on Redis/AsyncRedis — Plans 05."""
 
-from __future__ import annotations
-
 import time
 import warnings
 

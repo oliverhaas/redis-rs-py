@@ -1,7 +1,5 @@
 """Verifiers for the admin / scan / keyspace family."""
 
-from __future__ import annotations
-
 from . import verifier
 
 

@@ -1,7 +1,5 @@
 """Buffered-then-flushed pipeline semantics: chained calls, execute() returns list."""
 
-from __future__ import annotations
-
 
 def test_pipeline_set_get_returns_list(client) -> None:
     """Basic buffered pipeline: SET + GET returns a list."""

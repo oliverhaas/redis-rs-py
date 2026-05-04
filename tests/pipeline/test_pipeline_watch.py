@@ -1,7 +1,5 @@
 """WATCH / WatchError tests for the sync Pipeline."""
 
-from __future__ import annotations
-
 import threading
 
 import pytest

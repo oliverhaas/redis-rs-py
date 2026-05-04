@@ -12,8 +12,6 @@ This test is intentionally heavyweight (~30-60 s wall clock):
 Gated behind REDIS_RS_PY_SENTINEL_TESTS=1.
 """
 
-from __future__ import annotations
-
 import time
 from typing import TYPE_CHECKING
 

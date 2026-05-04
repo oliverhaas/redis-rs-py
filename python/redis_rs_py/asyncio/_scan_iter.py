@@ -5,8 +5,6 @@ PyO3 pyclass isn't expressible directly. Attached to Redis (asyncio)
 via monkey-patch in redis_rs_py.asyncio.__init__.py.
 """
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:

@@ -1,7 +1,5 @@
 """Server-side scripting — EVAL, EVALSHA, FCALL, FUNCTION, SCRIPT *."""
 
-from __future__ import annotations
-
 import contextlib
 
 import pytest

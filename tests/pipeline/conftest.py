@@ -4,8 +4,6 @@ Reuses the session-wide `valkey_url` from the top-level `tests/conftest.py`.
 Each test that mutates Valkey uses flushdb via its own client.
 """
 
-from __future__ import annotations
-
 import pytest
 
 

@@ -23,8 +23,6 @@ Adding or moving an entry between buckets is a CHANGELOG-worthy event.
 The pre-commit hook will fail the commit if the README block is stale.
 """
 
-from __future__ import annotations
-
 from typing import Final, Literal, TypedDict
 
 Status = Literal["implemented", "partial", "deferred"]

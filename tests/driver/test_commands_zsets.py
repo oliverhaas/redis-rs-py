@@ -1,7 +1,5 @@
 """Sorted-set command coverage on Redis/AsyncRedis — Plan 07."""
 
-from __future__ import annotations
-
 import pytest
 from redis_rs_py.exceptions import DataError
 

@@ -1,7 +1,5 @@
 """Verifiers for the scripts and functions command family."""
 
-from __future__ import annotations
-
 from . import verifier
 
 

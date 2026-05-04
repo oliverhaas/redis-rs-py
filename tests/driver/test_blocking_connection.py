@@ -14,8 +14,6 @@ These tests pin that contract:
      driver.
 """
 
-from __future__ import annotations
-
 import asyncio
 import threading
 import time

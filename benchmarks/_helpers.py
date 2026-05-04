@@ -26,8 +26,6 @@ valkey-glide availability: if the ``BENCH_SKIP_GLIDE`` env var is set,
 This allows CI to gate glide scenarios without failing the whole suite.
 """
 
-from __future__ import annotations
-
 import os
 from typing import Any
 

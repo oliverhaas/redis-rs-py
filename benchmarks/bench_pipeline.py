@@ -20,8 +20,6 @@ Or via the orchestrator:
     uv run --group bench python benchmarks/run_all.py
 """
 
-from __future__ import annotations
-
 import asyncio
 import sys
 from pathlib import Path

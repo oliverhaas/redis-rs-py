@@ -1,7 +1,5 @@
 """adiscard() / reset() / aclose() tests for AsyncPipeline."""
 
-from __future__ import annotations
-
 import pytest
 from redis_rs_py.exceptions import RedisError
 

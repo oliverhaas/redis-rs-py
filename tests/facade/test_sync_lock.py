@@ -1,7 +1,5 @@
 """Tests for the Redis.lock() / Lock distributed lock helper."""
 
-from __future__ import annotations
-
 import pytest
 
 

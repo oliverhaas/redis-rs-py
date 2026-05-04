@@ -10,8 +10,6 @@ Both helpers are attached to Redis via __init__.py monkey-patch
 at import time so users can call `redis.scan_iter(...)` directly.
 """
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:

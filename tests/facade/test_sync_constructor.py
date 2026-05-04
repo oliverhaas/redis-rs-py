@@ -1,7 +1,5 @@
 """Tests for Redis.__new__ / Redis.__init__ constructor behaviour."""
 
-from __future__ import annotations
-
 
 def test_default_construction():
     """Redis() with no args constructs without raising."""

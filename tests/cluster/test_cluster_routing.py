@@ -1,7 +1,5 @@
 """Single-key routing — verify SET lands in the right slot."""
 
-from __future__ import annotations
-
 import pytest
 from redis_rs_py.cluster import RedisCluster
 

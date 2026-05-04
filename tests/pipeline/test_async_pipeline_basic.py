@@ -1,7 +1,5 @@
 """Async pipeline: buffered commands, aexecute() returns list."""
 
-from __future__ import annotations
-
 import pytest
 
 

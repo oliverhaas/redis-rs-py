@@ -10,8 +10,6 @@ your local results disagree with the committed numbers, check that
 ``benchmarks/RESULTS.md``'s reference-machine block.
 """
 
-from __future__ import annotations
-
 import os
 from collections.abc import Iterator
 

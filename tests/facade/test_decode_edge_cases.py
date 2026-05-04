@@ -7,8 +7,6 @@ Covers:
 - Nested containers (lists of tuples, dicts-of-lists) are decoded recursively
 """
 
-from __future__ import annotations
-
 import pytest
 
 

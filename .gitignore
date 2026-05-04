@@ -16,6 +16,7 @@ dump.rdb
 CLAUDE.md
 .worktrees/
 *.sqlite3
+scheduled_tasks.lock
 
 # Rust build artifacts
 target/

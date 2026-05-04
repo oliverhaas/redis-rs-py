@@ -96,6 +96,13 @@ ignore = [
 allow-star-arg-any = true
 suppress-none-returning = true
 
+# `from __future__ import annotations` is unnecessary for our py314 floor and
+# actively harmful — it forces every annotation into a string, breaking the
+# runtime introspection that dataclasses/pydantic/etc rely on. PEP 649 in 3.14
+# already provides deferred-evaluation semantics natively.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"__future__.annotations".msg = "Not needed on py314 (PEP 649); strings break runtime annotation introspection."
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
   "ANN",
