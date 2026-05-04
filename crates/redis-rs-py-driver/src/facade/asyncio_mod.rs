@@ -8,7 +8,6 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use pyo3::exceptions::PyNotImplementedError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple, PyType};
 
@@ -280,12 +279,39 @@ impl AsyncRedis {
         )
     }
 
-    #[pyo3(signature = (**kwargs))]
-    fn pubsub(&self, kwargs: Option<Bound<'_, PyDict>>) -> PyResult<Py<PyAny>> {
-        let _ = kwargs;
-        Err(PyNotImplementedError::new_err(
-            "Async PubSub is implemented by plan 14.",
-        ))
+    #[pyo3(signature = (
+        *,
+        ignore_subscribe_messages = false,
+        health_check_interval = 30.0,
+        shard_hint = None,
+    ))]
+    fn pubsub(
+        &self,
+        py: Python<'_>,
+        ignore_subscribe_messages: bool,
+        health_check_interval: f64,
+        shard_hint: Option<Py<PyAny>>,
+    ) -> PyResult<crate::facade::pubsub::AsyncPubSub> {
+        let _ = shard_hint;
+        let interval = std::time::Duration::from_secs_f64(health_check_interval.max(0.1));
+        let client = self
+            .connection
+            .build_client_for_pubsub()
+            .map_err(pyo3::exceptions::PyConnectionError::new_err)?;
+        let bridge = py.detach(|| {
+            crate::runtime::get_runtime().block_on(async move {
+                crate::facade::pubsub::PubSubBridge::spawn(client, interval).await
+            })
+        });
+        let bridge = bridge.map_err(crate::exceptions::PubSubError::new_err)?;
+        Ok(crate::facade::pubsub::AsyncPubSub {
+            bridge: Some(bridge),
+            channel_handlers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pattern_handlers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            shard_handlers: std::sync::Mutex::new(std::collections::HashMap::new()),
+            ignore_subscribe_messages,
+            health_check_interval: interval,
+        })
     }
 
     #[pyo3(signature = (func, *watches, value_from_callable = false, watch_delay = None, **_kwargs))]
@@ -332,5 +358,6 @@ impl AsyncRedis {
 pub fn register(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<AsyncRedis>()?;
     m.add_class::<crate::facade::pipeline::AsyncPipeline>()?;
+    m.add_class::<crate::facade::pubsub::AsyncPubSub>()?;
     Ok(())
 }

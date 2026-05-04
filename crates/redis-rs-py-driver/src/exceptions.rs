@@ -103,6 +103,7 @@ pub enum ExceptionClass {
     AskError,
     TryAgainError,
     WatchError,
+    PubSubError,
 }
 
 impl ExceptionClass {
@@ -129,6 +130,7 @@ impl ExceptionClass {
             ExceptionClass::AskError => PyErr::new::<AskError, _>(msg),
             ExceptionClass::TryAgainError => PyErr::new::<TryAgainError, _>(msg),
             ExceptionClass::WatchError => PyErr::new::<WatchError, _>(msg),
+            ExceptionClass::PubSubError => PyErr::new::<PubSubError, _>(msg),
         }
     }
 }

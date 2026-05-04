@@ -28,6 +28,8 @@ fn _driver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<facade::sync::Lock>()?;
     m.add_class::<facade::pipeline::Pipeline>()?;
     m.add_class::<facade::pipeline::AsyncPipeline>()?;
+    m.add_class::<facade::pubsub::PubSub>()?;
+    m.add_class::<facade::pubsub::PubSubWorkerThread>()?;
 
     m.add_function(wrap_pyfunction!(test_helpers::_test_resolved_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(test_helpers::_test_resolved_none, m)?)?;

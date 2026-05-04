@@ -96,6 +96,8 @@ pub enum RawResult {
     IntPair(Option<(i64, i64)>),
     /// `list[dict[bytes, bytes]]` — used by CLIENT LIST.
     BytesPairsList(Vec<Vec<(Vec<u8>, Vec<u8>)>>),
+    /// A pubsub message dict — used by AsyncPubSub.aget_message.
+    PubSubMessage(crate::facade::pubsub::PubSubMessage),
 }
 
 fn redis_value_to_py(py: Python<'_>, v: redis::Value) -> PyResult<Py<PyAny>> {
@@ -345,6 +347,7 @@ impl RawResult {
             }
             RawResult::Value(v) => redis_value_to_py(py, v),
             RawResult::Error(class, e) => Err(class.into_py_err(py, e)),
+            RawResult::PubSubMessage(msg) => msg.into_py_dict(py),
             // --- Stream variants (Plan 08) ---
             RawResult::StreamEntries(entries) => {
                 let py_entries = build_stream_entries(py, entries)?;

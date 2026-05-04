@@ -137,6 +137,17 @@ impl ValkeyConn {
     pub fn blocking_initialised(&self) -> bool {
         self.blocking.initialized()
     }
+
+    /// Build a fresh `redis::Client` carrying the same URL and TLS opts as
+    /// this connection. Used by the pubsub bridge to open a dedicated
+    /// subscriber connection.
+    pub fn build_client_for_pubsub(&self) -> Result<redis::Client, String> {
+        match &self.config {
+            ConnConfig::Standard { url, tls_opts } => {
+                create_client(url, tls_opts.as_ref()).map_err(|e| e.to_string())
+            }
+        }
+    }
 }
 
 // =========================================================================

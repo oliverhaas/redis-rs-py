@@ -9,7 +9,7 @@ an awaitable.
 # `redis_rs_py._driver.asyncio` submodule in `sys.modules`.
 import redis_rs_py._driver  # noqa: F401
 from redis_rs_py._driver import AsyncPipeline as Pipeline
-from redis_rs_py._driver.asyncio import Redis  # ty: ignore[unresolved-import]
+from redis_rs_py._driver.asyncio import PubSub, Redis  # ty: ignore[unresolved-import]
 from redis_rs_py.asyncio._scan_iter import scan_iter_async as _scan_iter_async
 
 # Attach the async scan_iter helper to the async Redis class.
@@ -19,4 +19,4 @@ from redis_rs_py.asyncio._scan_iter import scan_iter_async as _scan_iter_async
 Redis.scan_iter = _scan_iter_async  # type: ignore[attr-defined]
 Redis.scan_iter_async = _scan_iter_async  # type: ignore[attr-defined]
 
-__all__ = ["Pipeline", "Redis"]
+__all__ = ["Pipeline", "PubSub", "Redis"]

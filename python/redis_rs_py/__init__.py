@@ -6,7 +6,7 @@ hierarchy are exposed.
 """
 
 from redis_rs_py import exceptions
-from redis_rs_py._driver import Lock, Pipeline, Redis, RedisRsAwaitable, __version__
+from redis_rs_py._driver import Lock, Pipeline, PubSub, PubSubWorkerThread, Redis, RedisRsAwaitable, __version__
 from redis_rs_py._scan_iter import scan_iter as _scan_iter
 from redis_rs_py.asyncio._scan_iter import scan_iter_async as _scan_iter_async
 from redis_rs_py.exceptions import (
@@ -68,7 +68,9 @@ __all__ = [
     "NoScriptError",
     "OutOfMemoryError",
     "Pipeline",
+    "PubSub",
     "PubSubError",
+    "PubSubWorkerThread",
     "ReadOnlyError",
     "Redis",
     "RedisError",

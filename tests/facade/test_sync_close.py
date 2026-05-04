@@ -59,12 +59,14 @@ def test_pipeline_returns_pipeline(valkey_url: str):
         assert isinstance(pipe, Pipeline)
 
 
-def test_pubsub_stub_raises_not_implemented(valkey_url: str):
-    """pubsub() raises NotImplementedError (not yet implemented)."""
-    from redis_rs_py import Redis
+def test_pubsub_returns_pubsub(valkey_url: str):
+    """pubsub() returns a PubSub instance (Plan 14)."""
+    from redis_rs_py import PubSub, Redis
 
-    with Redis.from_url(valkey_url) as r, pytest.raises(NotImplementedError):
-        r.pubsub()
+    with Redis.from_url(valkey_url) as r:
+        ps = r.pubsub()
+        assert isinstance(ps, PubSub)
+        ps.close()
 
 
 def test_transaction_runs_callable(valkey_url: str):
