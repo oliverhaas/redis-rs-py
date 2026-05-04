@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import sys
 
-from redis_rs_py._driver.asyncio.sentinel import AsyncSentinel  # type: ignore[attr-defined]
+import redis_rs_py._driver  # noqa: F401
+from redis_rs_py._driver.asyncio.sentinel import AsyncSentinel  # ty: ignore[unresolved-import]
 
 # Redis-py compatibility alias.
 Sentinel = AsyncSentinel
