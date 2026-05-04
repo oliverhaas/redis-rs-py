@@ -393,3 +393,165 @@ def cluster_client_sync(cluster_urls: list[str]):
     rc.flushall()
     yield rc
     rc.close()
+
+
+# =============================================================================
+# Sentinel fixtures (Plan 16) — gated behind REDIS_RS_PY_SENTINEL_TESTS=1
+# =============================================================================
+#
+# Spins 1 master + 1 replica + 3 sentinels via testcontainers on a shared
+# docker network. Each sentinel gets a config that monitors the master under
+# SERVICE_NAME with quorum 2. Tests are gated behind
+# REDIS_RS_PY_SENTINEL_TESTS=1 to avoid slowing down the regular CI loop.
+
+_SENTINEL_ENABLED = os.environ.get("REDIS_RS_PY_SENTINEL_TESTS", "0") == "1"
+
+SERVICE_NAME = "redis-rs-py-test-master"
+SENTINEL_PORT = 26379
+
+
+def _spawn_sentinel_topology() -> tuple[Any, list[DockerContainer], list[str]]:
+    """Bring up 1 master + 1 replica + 3 sentinels.
+
+    Returns (network, containers, sentinel_urls). All 5 containers share
+    a docker network so the sentinels can reach the master/replica by
+    name; the 3 sentinel ports are mapped back to host so the Python
+    client can connect from outside.
+    """
+    from testcontainers.core.network import Network
+
+    network = Network()
+    network.create()
+
+    containers: list[DockerContainer] = []
+    master_name = "valkey-sentinel-master"
+    replica_name = "valkey-sentinel-replica"
+
+    # Master.
+    master = (
+        DockerContainer(VALKEY_IMAGE)
+        .with_network(network)
+        .with_name(master_name)
+        .with_exposed_ports(6379)
+        .with_command(
+            'valkey-server --port 6379 --protected-mode no --appendonly no --save ""',
+        )
+    )
+    master.start()
+    wait_for_logs(master, "Ready to accept connections", timeout=30)
+    containers.append(master)
+
+    # Replica.
+    replica = (
+        DockerContainer(VALKEY_IMAGE)
+        .with_network(network)
+        .with_name(replica_name)
+        .with_exposed_ports(6379)
+        .with_command(
+            f'valkey-server --port 6379 --protected-mode no --appendonly no --save "" --replicaof {master_name} 6379',
+        )
+    )
+    replica.start()
+    wait_for_logs(replica, "Ready to accept connections", timeout=30)
+    containers.append(replica)
+
+    # 3 sentinels — each gets its own config written at startup.
+    sentinel_urls: list[str] = []
+    for idx in range(3):
+        name = f"valkey-sentinel-{idx}"
+        cfg = (
+            f"port {SENTINEL_PORT}\n"
+            f"sentinel monitor {SERVICE_NAME} {master_name} 6379 2\n"
+            f"sentinel down-after-milliseconds {SERVICE_NAME} 2000\n"
+            f"sentinel parallel-syncs {SERVICE_NAME} 1\n"
+            f"sentinel failover-timeout {SERVICE_NAME} 10000\n"
+            f"sentinel resolve-hostnames yes\n"
+            f"protected-mode no\n"
+        )
+        # Write the config inside the container at startup via shell.
+        sentinel = (
+            DockerContainer(VALKEY_IMAGE)
+            .with_network(network)
+            .with_name(name)
+            .with_exposed_ports(SENTINEL_PORT)
+            .with_command(
+                "sh -c 'printf \""
+                + cfg.replace('"', '\\"').replace("\n", "\\n")
+                + '" | sed "s/\\\\n/\\n/g" > /tmp/sentinel.conf && '
+                + "valkey-sentinel /tmp/sentinel.conf'",
+            )
+        )
+        sentinel.start()
+        wait_for_logs(sentinel, r"\+monitor", timeout=30)
+        containers.append(sentinel)
+        host = sentinel.get_container_host_ip()
+        port = sentinel.get_exposed_port(SENTINEL_PORT)
+        sentinel_urls.append(f"redis://{host}:{port}")
+
+    return network, containers, sentinel_urls
+
+
+@pytest.fixture(scope="session")
+def _sentinel_topology(
+    tmp_path_factory: pytest.TempPathFactory,
+    worker_id: str,
+) -> Iterator[tuple[list[str], list[DockerContainer]]]:
+    """Internal shared sentinel topology fixture."""
+    if not _SENTINEL_ENABLED:
+        pytest.skip("Sentinel tests disabled. Set REDIS_RS_PY_SENTINEL_TESTS=1 to enable.")
+
+    if worker_id == "master":
+        network, containers, urls = _spawn_sentinel_topology()
+        try:
+            yield urls, containers
+        finally:
+            for c in containers:
+                c.stop()
+            network.remove()
+        return
+
+    root = tmp_path_factory.getbasetemp().parent
+    lockfile = root / "valkey_sentinel.lock"
+    urlsfile = root / "valkey_sentinel.urls"
+
+    network = None
+    containers: list[DockerContainer] = []
+
+    with FileLock(str(lockfile)):
+        if urlsfile.exists():
+            urls = urlsfile.read_text().strip().splitlines()
+        else:
+            network, containers, urls = _spawn_sentinel_topology()
+            urlsfile.write_text("\n".join(urls))
+
+    try:
+        yield urls, containers
+    finally:
+        if containers:
+            for c in containers:
+                c.stop()
+            if network is not None:
+                network.remove()
+            urlsfile.unlink(missing_ok=True)
+
+
+@pytest.fixture(scope="session")
+def sentinel_urls(_sentinel_topology: tuple[list[str], list[DockerContainer]]) -> list[str]:
+    """List of redis://host:port URLs for the 3 sentinels."""
+    urls, _ = _sentinel_topology
+    return urls
+
+
+@pytest.fixture(scope="session")
+def sentinel_service_name() -> str:
+    """The service name registered with the sentinels."""
+    return SERVICE_NAME
+
+
+@pytest.fixture(scope="session")
+def sentinel_containers(
+    _sentinel_topology: tuple[list[str], list[DockerContainer]],
+) -> list[DockerContainer]:
+    """Container handles for the sentinel topology — used by the failover test."""
+    _, containers = _sentinel_topology
+    return containers

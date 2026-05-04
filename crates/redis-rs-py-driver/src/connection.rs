@@ -14,7 +14,7 @@ use redis::caching::CacheConfig;
 use redis::cluster::ClusterClient;
 use redis::cluster_async::ClusterConnection;
 use redis::{Client, RedisResult};
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, RwLock};
 
 #[derive(Clone, Debug)]
 pub struct TlsOpts {
@@ -43,6 +43,132 @@ pub struct ClientCacheOpts {
     pub ttl_secs: u64,
 }
 
+// =========================================================================
+// SentinelConn — sentinel-aware connection with RwLock'd current master.
+// Lifted verbatim from django-cachex-redis-rs/src/connection.rs:100-177.
+// =========================================================================
+
+/// Sentinel-aware connection that re-discovers master on failover.
+///
+/// The struct owns:
+/// * `inner` — RwLock'd `ConnectionManager` to the *current* master.
+///   Reads share the lock; only `rediscover()` takes write.
+/// * `sentinel_urls` — the list of sentinel hosts. Iterated round-robin
+///   on rediscover until one answers.
+/// * `service_name` — the master name registered with the sentinels.
+/// * `db` — DB index to use on the discovered master URL.
+/// * `is_blocking` — true for the lazy blocking-conn slot.
+/// * `cache_opts` — client-side caching opts (only honored on
+///   non-blocking connections).
+/// * `tls_opts` — TLS opts re-applied per rediscover.
+/// * `is_slave` — `true` when this connection should target a slave.
+#[derive(Clone)]
+pub struct SentinelConn {
+    pub(crate) inner: Arc<RwLock<ConnectionManager>>,
+    sentinel_urls: Arc<[String]>,
+    service_name: Arc<str>,
+    db: i64,
+    is_blocking: bool,
+    cache_opts: Option<ClientCacheOpts>,
+    tls_opts: Option<TlsOpts>,
+    is_slave: bool,
+}
+
+impl SentinelConn {
+    fn conn_config(&self) -> ConnectionManagerConfig {
+        if self.is_blocking {
+            blocking_conn_manager_config()
+        } else {
+            conn_manager_config(self.cache_opts.as_ref())
+        }
+    }
+
+    pub async fn get_conn(&self) -> ConnectionManager {
+        self.inner.read().await.clone()
+    }
+
+    /// Errors that should trigger a rediscover-and-retry. Lifted from
+    /// cachex; matches the redis-rs failover-class set.
+    pub fn is_failover_error(e: &redis::RedisError) -> bool {
+        matches!(
+            e.kind(),
+            redis::ErrorKind::Io
+                | redis::ErrorKind::Server(redis::ServerErrorKind::BusyLoading)
+                | redis::ErrorKind::Server(redis::ServerErrorKind::TryAgain)
+                | redis::ErrorKind::Server(redis::ServerErrorKind::ReadOnly)
+        ) || e.is_connection_dropped()
+    }
+
+    /// Walk the sentinel list, find a healthy one, ask it for the
+    /// current master/slave, build a fresh ConnectionManager against
+    /// that address, swap into `self.inner`.
+    pub async fn rediscover(&self) -> RedisResult<()> {
+        for sentinel_url in self.sentinel_urls.iter() {
+            let client = match create_client(sentinel_url.as_str(), self.tls_opts.as_ref()) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let mut conn =
+                match ConnectionManager::new_with_config(client, conn_manager_config(None)).await {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+            let target_addr: Option<(String, String)> = if self.is_slave {
+                let slaves: RedisResult<Vec<Vec<(String, String)>>> = redis::cmd("SENTINEL")
+                    .arg("slaves")
+                    .arg(&*self.service_name)
+                    .query_async(&mut conn)
+                    .await;
+                match slaves {
+                    Ok(rows) => rows
+                        .into_iter()
+                        .filter_map(|row| {
+                            let map: std::collections::HashMap<_, _> = row.into_iter().collect();
+                            let flags = map.get("flags").cloned().unwrap_or_default();
+                            if flags.contains("disconnected") || flags.contains("s_down") {
+                                return None;
+                            }
+                            Some((map.get("ip")?.clone(), map.get("port")?.clone()))
+                        })
+                        .next(),
+                    Err(_) => None,
+                }
+            } else {
+                let master: RedisResult<Vec<String>> = redis::cmd("SENTINEL")
+                    .arg("get-master-addr-by-name")
+                    .arg(&*self.service_name)
+                    .query_async(&mut conn)
+                    .await;
+                match master {
+                    Ok(addr) if addr.len() == 2 => Some((addr[0].clone(), addr[1].clone())),
+                    _ => None,
+                }
+            };
+
+            if let Some((host, port)) = target_addr {
+                let scheme = if self.tls_opts.is_some() {
+                    "rediss"
+                } else {
+                    "redis"
+                };
+                let base_url = format!("{scheme}://{host}:{port}/{}", self.db);
+                let target_url = url_with_resp3(&base_url);
+                let client = create_client(target_url.as_str(), self.tls_opts.as_ref())?;
+                let new_mgr =
+                    ConnectionManager::new_with_config(client, self.conn_config()).await?;
+                let mut guard = self.inner.write().await;
+                *guard = new_mgr;
+                return Ok(());
+            }
+        }
+        Err(redis::RedisError::from((
+            redis::ErrorKind::Io,
+            "Failed to rediscover master from any sentinel",
+        )))
+    }
+}
+
 #[derive(Clone)]
 enum ConnConfig {
     Standard {
@@ -53,12 +179,20 @@ enum ConnConfig {
         urls: Arc<[String]>,
         tls_opts: Option<TlsOpts>,
     },
+    Sentinel {
+        sentinel_urls: Arc<[String]>,
+        service_name: Arc<str>,
+        db: i64,
+        is_slave: bool,
+        tls_opts: Option<TlsOpts>,
+    },
 }
 
 #[derive(Clone)]
 pub enum ValkeyConnInner {
     Standard(ConnectionManager),
     Cluster(ClusterConnection),
+    Sentinel(SentinelConn),
 }
 
 #[derive(Clone)]
@@ -97,6 +231,13 @@ impl ValkeyConn {
             ValkeyConnInner::Standard(c) => c.get_cache_statistics(),
             // redis-rs cluster_async has no CacheConfig hook.
             ValkeyConnInner::Cluster(_) => None,
+            ValkeyConnInner::Sentinel(s) => {
+                // Try the read lock without blocking; if contested, give up.
+                s.inner
+                    .try_read()
+                    .ok()
+                    .and_then(|c| c.get_cache_statistics())
+            }
         }
     }
 
@@ -163,6 +304,18 @@ impl ValkeyConn {
                     .unwrap_or("redis://127.0.0.1");
                 create_client(url, tls_opts.as_ref()).map_err(|e| e.to_string())
             }
+            ConnConfig::Sentinel {
+                sentinel_urls,
+                tls_opts,
+                ..
+            } => {
+                // Use the first sentinel URL as a fallback pubsub endpoint.
+                let url = sentinel_urls
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("redis://127.0.0.1");
+                create_client(url, tls_opts.as_ref()).map_err(|e| e.to_string())
+            }
         }
     }
 
@@ -170,6 +323,12 @@ impl ValkeyConn {
     #[allow(dead_code)]
     pub fn is_cluster(&self) -> bool {
         matches!(self.regular, ValkeyConnInner::Cluster(_))
+    }
+
+    /// True if this is a sentinel-backed connection.
+    #[allow(dead_code)]
+    pub fn is_sentinel(&self) -> bool {
+        matches!(self.regular, ValkeyConnInner::Sentinel(_))
     }
 }
 
@@ -282,6 +441,151 @@ pub async fn connect_cluster(
     })
 }
 
+/// Helper: create a SentinelConn inner (used by both regular and lazy
+/// blocking variants).
+async fn create_sentinel_inner(
+    sentinel_urls: &[String],
+    service_name: &str,
+    db: i64,
+    is_blocking: bool,
+    is_slave: bool,
+    cache_opts: Option<ClientCacheOpts>,
+    tls_opts: Option<TlsOpts>,
+) -> RedisResult<ValkeyConnInner> {
+    let config = if is_blocking {
+        blocking_conn_manager_config()
+    } else {
+        conn_manager_config(cache_opts.as_ref())
+    };
+    let mut last_err = String::from("No sentinels provided");
+
+    for sentinel_url in sentinel_urls {
+        let client = match create_client(sentinel_url.as_str(), tls_opts.as_ref()) {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = format!("Sentinel {sentinel_url}: {e}");
+                continue;
+            }
+        };
+
+        let mut conn =
+            match ConnectionManager::new_with_config(client, conn_manager_config(None)).await {
+                Ok(c) => c,
+                Err(e) => {
+                    last_err = format!("Sentinel {sentinel_url}: {e}");
+                    continue;
+                }
+            };
+
+        let target_addr: Option<(String, String)> = if is_slave {
+            let slaves: RedisResult<Vec<Vec<(String, String)>>> = redis::cmd("SENTINEL")
+                .arg("slaves")
+                .arg(service_name)
+                .query_async(&mut conn)
+                .await;
+            match slaves {
+                Ok(rows) => rows
+                    .into_iter()
+                    .filter_map(|row| {
+                        let map: std::collections::HashMap<_, _> = row.into_iter().collect();
+                        let flags = map.get("flags").cloned().unwrap_or_default();
+                        if flags.contains("disconnected") || flags.contains("s_down") {
+                            return None;
+                        }
+                        Some((map.get("ip")?.clone(), map.get("port")?.clone()))
+                    })
+                    .next(),
+                Err(e) => {
+                    last_err = format!("Sentinel {sentinel_url}: {e}");
+                    None
+                }
+            }
+        } else {
+            let master: RedisResult<Vec<String>> = redis::cmd("SENTINEL")
+                .arg("get-master-addr-by-name")
+                .arg(service_name)
+                .query_async(&mut conn)
+                .await;
+            match master {
+                Ok(addr) if addr.len() == 2 => Some((addr[0].clone(), addr[1].clone())),
+                Ok(_) => {
+                    last_err = format!("Sentinel {sentinel_url}: unexpected response");
+                    None
+                }
+                Err(e) => {
+                    last_err = format!("Sentinel {sentinel_url}: {e}");
+                    None
+                }
+            }
+        };
+
+        if let Some((host, port)) = target_addr {
+            let scheme = if tls_opts.is_some() {
+                "rediss"
+            } else {
+                "redis"
+            };
+            let base_url = format!("{scheme}://{host}:{port}/{db}");
+            let target_url = url_with_resp3(&base_url);
+            let target_client = create_client(target_url.as_str(), tls_opts.as_ref())?;
+            let mgr = ConnectionManager::new_with_config(target_client, config).await?;
+            return Ok(ValkeyConnInner::Sentinel(SentinelConn {
+                inner: Arc::new(RwLock::new(mgr)),
+                sentinel_urls: Arc::from(sentinel_urls),
+                service_name: Arc::from(service_name),
+                db,
+                is_blocking,
+                cache_opts,
+                tls_opts,
+                is_slave,
+            }));
+        }
+    }
+
+    Err(redis::RedisError::from((
+        redis::ErrorKind::Io,
+        "Failed to discover master from any sentinel",
+        last_err,
+    )))
+}
+
+/// Connect via a Sentinel quorum with automatic failover. `is_slave`
+/// selects the master (false) or any healthy slave (true).
+pub async fn connect_sentinel(
+    sentinel_urls: Vec<String>,
+    service_name: &str,
+    db: i64,
+    is_slave: bool,
+    cache_opts: Option<ClientCacheOpts>,
+    tls_opts: Option<TlsOpts>,
+) -> Result<ValkeyConn, String> {
+    if sentinel_urls.is_empty() {
+        return Err("connect_sentinel: at least one sentinel URL required".into());
+    }
+    let inner = create_sentinel_inner(
+        &sentinel_urls,
+        service_name,
+        db,
+        false,
+        is_slave,
+        cache_opts,
+        tls_opts.clone(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(ValkeyConn {
+        regular: inner,
+        blocking: Arc::new(OnceCell::new()),
+        config: ConnConfig::Sentinel {
+            sentinel_urls: Arc::from(sentinel_urls),
+            service_name: Arc::from(service_name),
+            db,
+            is_slave,
+            tls_opts,
+        },
+    })
+}
+
 async fn build_blocking(cfg: &ConnConfig) -> RedisResult<ValkeyConnInner> {
     match cfg {
         ConnConfig::Standard { url, tls_opts } => {
@@ -301,12 +605,55 @@ async fn build_blocking(cfg: &ConnConfig) -> RedisResult<ValkeyConnInner> {
             let conn = client.get_async_connection().await?;
             Ok(ValkeyConnInner::Cluster(conn))
         }
+        ConnConfig::Sentinel {
+            sentinel_urls,
+            service_name,
+            db,
+            is_slave,
+            tls_opts,
+        } => {
+            create_sentinel_inner(
+                sentinel_urls,
+                service_name,
+                *db,
+                true,
+                *is_slave,
+                None,
+                tls_opts.clone(),
+            )
+            .await
+        }
     }
 }
 
 // =========================================================================
 // Dispatch macros
 // =========================================================================
+
+/// Sentinel retry-on-failover wrapper. Lifted verbatim from cachex.
+///
+/// On a failover-class error: rediscover (which swaps `inner`), then
+/// re-run `$op` against the freshly-acquired connection.
+/// `$op` is an expression producing a Future (like `c.get(key)`).
+#[macro_export]
+macro_rules! sentinel_retry {
+    ($s:expr, $c:ident, $op:expr) => {{
+        let mut $c = $s.get_conn().await;
+        match $op.await {
+            Ok(v) => Ok(v),
+            Err(e) if $crate::connection::SentinelConn::is_failover_error(&e) => {
+                match $s.rediscover().await {
+                    Ok(()) => {
+                        let mut $c = $s.get_conn().await;
+                        $op.await
+                    }
+                    Err(re) => Err(re),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }};
+}
 
 /// For commands that build a `redis::Cmd` by hand and call `.query_async`.
 #[macro_export]
@@ -315,17 +662,52 @@ macro_rules! dispatch_cmd {
         match $self {
             $crate::connection::ValkeyConnInner::Standard(c) => $cmd.query_async(c).await,
             $crate::connection::ValkeyConnInner::Cluster(c) => $cmd.query_async(c).await,
+            $crate::connection::ValkeyConnInner::Sentinel(s) => {
+                let cmd_retry = $cmd.clone();
+                let mut c = s.get_conn().await;
+                match $cmd.query_async(&mut c).await {
+                    Ok(v) => Ok(v),
+                    Err(e) if $crate::connection::SentinelConn::is_failover_error(&e) => {
+                        match s.rediscover().await {
+                            Ok(()) => {
+                                let mut c = s.get_conn().await;
+                                cmd_retry.query_async(&mut c).await
+                            }
+                            Err(re) => Err(re),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            }
         }
     };
 }
 
 /// For commands that call a method on `redis::AsyncCommands`.
+/// `$op` must be an expression that produces a `Future<Output = Result<_, redis::RedisError>>`.
+/// The macro binds `$c: ConnectionManager` for the Sentinel arm.
 #[macro_export]
 macro_rules! conn_method {
     ($self:expr, $c:ident, $op:expr) => {
         match $self {
             $crate::connection::ValkeyConnInner::Standard($c) => $op.await,
             $crate::connection::ValkeyConnInner::Cluster($c) => $op.await,
+            $crate::connection::ValkeyConnInner::Sentinel(__s) => {
+                let mut $c = __s.get_conn().await;
+                match $op.await {
+                    Ok(v) => Ok(v),
+                    Err(e) if $crate::connection::SentinelConn::is_failover_error(&e) => {
+                        match __s.rediscover().await {
+                            Ok(()) => {
+                                let mut $c = __s.get_conn().await;
+                                $op.await
+                            }
+                            Err(re) => Err(re),
+                        }
+                    }
+                    Err(e) => Err(e),
+                }
+            }
         }
     };
 }
@@ -858,6 +1240,23 @@ impl ValkeyConn {
                     .map_err(|e| e.to_string())?;
                 Ok(ReservedConnection::new(conn))
             }
+            ConnConfig::Sentinel {
+                sentinel_urls,
+                tls_opts,
+                ..
+            } => {
+                // Use the first sentinel URL as a fallback for WATCH pipelines.
+                let url = sentinel_urls
+                    .first()
+                    .map(|s| s.as_str())
+                    .unwrap_or("redis://127.0.0.1");
+                let client = create_client(url, tls_opts.as_ref()).map_err(|e| e.to_string())?;
+                let conn = client
+                    .get_multiplexed_async_connection()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(ReservedConnection::new(conn))
+            }
         }
     }
 }
@@ -897,6 +1296,21 @@ impl ValkeyConnInner {
                     pipe.add_command(cmd);
                 }
                 pipe.query_async(c).await
+            }
+            Self::Sentinel(s) => {
+                let mut c = s.get_conn().await;
+                let mut pipe = redis::pipe();
+                if transaction {
+                    pipe.atomic();
+                }
+                for (cmd_name, args) in &commands {
+                    let mut cmd = redis::cmd(cmd_name);
+                    for a in args {
+                        cmd.arg(a.as_slice());
+                    }
+                    pipe.add_command(cmd);
+                }
+                pipe.query_async(&mut c).await
             }
         }
     }
