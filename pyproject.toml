@@ -46,6 +46,7 @@ dev = [
   "redis==7.4.0",
   "valkey==6.1.1",
 ]
+bench = ["pyperf==2.10.0", "redis[hiredis]==7.4.0", "valkey-glide==2.3.1"]
 
 [build-system]
 requires = ["maturin>=1.13,<2.0"]
@@ -107,7 +108,22 @@ suppress-none-returning = true
   "S106",    # test passwords are intentionally hard-coded
   "S110",    # try-except-pass is intentional in fault-tolerance tests
 ]
-"benchmarks/**" = ["ANN", "ARG", "BLE001", "S101", "T201", "TC001", "TC003"]
+"benchmarks/**" = [
+  "ANN",
+  "ARG",
+  "BLE001",
+  "EXE001",
+  "N806",
+  "PERF102",
+  "PERF401",
+  "PLC0415",
+  "S101",
+  "S603",
+  "SIM108",
+  "T201",
+  "TC001",
+  "TC003",
+]
 "python/redis_rs_py/_driver.pyi" = [
   "N801",   # `class exceptions:` mirrors redis.exceptions module name
   "PYI021", # docstrings in stubs are useful for IDE tooling

@@ -1,0 +1,97 @@
+name: Benchmarks
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "python/**"
+      - "benchmarks/**"
+      - ".github/workflows/bench.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+  schedule:
+    # Nightly full run at 03:00 UTC.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "smoke or full"
+        required: true
+        default: "smoke"
+
+jobs:
+  smoke:
+    name: Smoke benchmarks (PR gate)
+    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'smoke')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies + build extension
+        run: |
+          uv sync --group bench --group dev
+          uv run maturin develop --release --manifest-path crates/redis-rs-py-driver/Cargo.toml
+
+      - name: Run smoke benchmarks
+        run: uv run --group bench python benchmarks/run_all.py --smoke
+
+      - name: Upload smoke RESULTS
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-smoke-${{ github.run_id }}
+          path: |
+            benchmarks/RESULTS.md
+            benchmarks/results/*.json
+          retention-days: 14
+
+  full:
+    name: Full benchmarks (nightly)
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'full')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies + build extension
+        run: |
+          uv sync --group bench --group dev
+          uv run maturin develop --release --manifest-path crates/redis-rs-py-driver/Cargo.toml
+
+      - name: pyperf system tune (best-effort)
+        run: uv run --group bench python -m pyperf system tune || echo "system tune failed; continuing without it"
+
+      - name: Run full benchmarks
+        run: uv run --group bench python benchmarks/run_all.py
+
+      - name: pyperf system reset
+        if: always()
+        run: uv run --group bench python -m pyperf system reset || true
+
+      - name: Upload full RESULTS
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-full-${{ github.run_id }}
+          path: |
+            benchmarks/RESULTS.md
+            benchmarks/results/*.json
+          retention-days: 90
