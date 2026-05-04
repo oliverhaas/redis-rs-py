@@ -3,6 +3,7 @@
 Re-exports the Rust pyclasses registered on `_driver.cluster`.
 """
 
-from redis_rs_py._driver.cluster import ClusterNode, ClusterPubSub, RedisCluster
+import redis_rs_py._driver  # noqa: F401
+from redis_rs_py._driver.cluster import ClusterNode, ClusterPubSub, RedisCluster  # ty: ignore[unresolved-import]
 
 __all__ = ["ClusterNode", "ClusterPubSub", "RedisCluster"]
