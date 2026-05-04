@@ -8,6 +8,11 @@ blocking commands (which use the lazy second connection).
 import threading
 import time
 
+import pytest
+
+# Pub/sub semantics are server-global and timing-sensitive; serialise.
+pytestmark = pytest.mark.xdist_group(name="pubsub_serial")
+
 
 def test_normal_command_runs_with_active_subscription(
     redis_facade,

@@ -11,6 +11,9 @@ import time
 import pytest
 import redis as upstream_redis
 
+# Pub/sub semantics are server-global and timing-sensitive; serialise.
+pytestmark = pytest.mark.xdist_group(name="pubsub_serial")
+
 
 def _server_supports_shard_pubsub(url: str) -> bool:
     client = upstream_redis.Redis.from_url(url)

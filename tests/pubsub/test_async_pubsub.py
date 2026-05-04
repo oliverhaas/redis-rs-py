@@ -5,6 +5,9 @@ import asyncio
 
 import pytest
 
+# Pub/sub semantics are server-global and timing-sensitive; serialise.
+pytestmark = pytest.mark.xdist_group(name="pubsub_serial")
+
 
 @pytest.fixture
 async def async_redis(valkey_url: str):

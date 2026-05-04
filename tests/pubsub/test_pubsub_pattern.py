@@ -5,6 +5,9 @@ import time
 
 import pytest
 
+# Pub/sub semantics are server-global and timing-sensitive; serialise.
+pytestmark = pytest.mark.xdist_group(name="pubsub_serial")
+
 
 def test_psubscribe_then_publish_yields_pmessage(redis_facade, publisher) -> None:
     ps = redis_facade.pubsub()
