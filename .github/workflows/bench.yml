@@ -77,15 +77,8 @@ jobs:
           uv sync --group bench --group dev
           uv run maturin develop --release --manifest-path crates/redis-rs-py-driver/Cargo.toml
 
-      - name: pyperf system tune (best-effort)
-        run: uv run --group bench python -m pyperf system tune || echo "system tune failed; continuing without it"
-
       - name: Run full benchmarks
         run: uv run --group bench python benchmarks/run_all.py
-
-      - name: pyperf system reset
-        if: always()
-        run: uv run --group bench python -m pyperf system reset || true
 
       - name: Upload full RESULTS
         uses: actions/upload-artifact@v4

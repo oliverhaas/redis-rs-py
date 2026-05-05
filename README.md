@@ -35,7 +35,7 @@ Scenarios covered:
 - Pub/Sub message rate (1000-message batches).
 - Construct + first-PING latency.
 
-Each scenario runs every client (`redis-rs-py`, `redis-py[hiredis]`, `valkey-glide`) in a fresh subprocess against the same Valkey container, with `pyperf` doing warmup + calibration + median + p99. CI runs a smoke benchmark on every PR (`bench.yml`) and a full benchmark nightly; the **canonical** numbers are the user's local run on the documented reference machine — pyperf-tuned cloud runners are too noisy to publish from.
+Each scenario runs all three clients (`redis-rs-py`, `redis-py[hiredis]`, `valkey-glide`) against the same Valkey container, driven by `pytest-benchmark` (warmup + calibration + median + IQR per benchmark). The bench tests share a single Python process, so cross-client cache state is acknowledged and noted in the methodology section of `RESULTS.md`. CI runs a smoke benchmark on every PR (`bench.yml`) and a full benchmark nightly; the **canonical** numbers are the user's local run on the documented reference machine — cloud runners are too noisy to publish from.
 
 ## Compatibility matrix
 

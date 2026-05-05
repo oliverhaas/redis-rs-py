@@ -2,11 +2,11 @@
 
 Three clients, configured identically:
 
-* ``rs_client(url)``     — redis-rs-py sync client
-* ``rs_async_client(url)`` — redis-rs-py asyncio client
-* ``py_client(url)``     — redis-py sync client (with hiredis parser)
-* ``py_async_client(url)`` — redis-py asyncio client (with hiredis parser)
-* ``glide_async_client(url)`` — valkey-glide async client (no sync API)
+* ``rs_client(url)``         — redis-rs-py sync client
+* ``rs_async_client(url)``   — redis-rs-py asyncio client
+* ``py_client(url)``         — redis-py sync client (with hiredis parser)
+* ``py_async_client(url)``   — redis-py asyncio client (with hiredis parser)
+* ``glide_async_client(url)``— valkey-glide async client (no sync API)
 
 Notes on fairness:
 
@@ -16,10 +16,6 @@ Notes on fairness:
   managed connection (max_connections=1 for redis-py, default pool for
   the other two — they multiplex internally on one socket).
 * All clients use the same database (db=0).
-* The bench helpers do NOT reuse a Redis instance across pyperf
-  iterations — each ``bench_func`` invocation gets a fresh client and
-  closes it on teardown to prevent connection-state warmup from
-  benefiting one client more than another.
 
 valkey-glide availability: if the ``BENCH_SKIP_GLIDE`` env var is set,
 ``glide_async_client`` raises ``RuntimeError`` with a clear skip message.
@@ -38,6 +34,9 @@ LARGE_VALUE: bytes = b"y" * 10_000
 HOT_KEY: str = "bench:hot"
 MGET_KEYS: list[str] = [f"bench:mget:{i}" for i in range(100)]
 PIPELINE_KEYS: list[str] = [f"bench:pipe:{i}" for i in range(1000)]
+
+# Display order mirrors the table in RESULTS.md.
+CLIENT_ORDER: list[str] = ["redis-rs-py", "redis-py[hiredis]", "valkey-glide"]
 
 
 # ---------------------------------------------------------------------------
@@ -90,11 +89,10 @@ BENCH_SKIP_GLIDE = os.environ.get("BENCH_SKIP_GLIDE", "")
 async def glide_async_client(url: str) -> Any:
     """Construct a valkey-glide client.
 
-    glide-core is async-only, so this is an async constructor. The bench
-    code awaits this once at the start of ``bench_async_func`` setup.
+    glide-core is async-only, so this is an async constructor.
 
-    Raises ``RuntimeError`` (and prints a skip message) if ``BENCH_SKIP_GLIDE``
-    is set, so the bench suite can be run without glide installed.
+    Raises ``RuntimeError`` if ``BENCH_SKIP_GLIDE`` is set, so the bench
+    suite can be run without glide installed.
     """
     if BENCH_SKIP_GLIDE:
         raise RuntimeError(
@@ -115,7 +113,7 @@ async def glide_async_client(url: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle helpers — identical seed + teardown across clients.
+# Lifecycle helpers — identical seed across clients.
 # ---------------------------------------------------------------------------
 
 
@@ -158,80 +156,16 @@ def flush(url: str) -> None:
     client.close()
 
 
-def get_valkey_url() -> str:
-    """Resolve the Valkey URL the bench suite is currently pointed at.
-
-    Set by ``conftest.py`` (when run via pytest) or via the
-    ``BENCH_VALKEY_URL`` env var (when run via ``pyperf``-style direct
-    invocation, which is how ``run_all.py`` calls each script).
-    """
-    url = os.environ.get("BENCH_VALKEY_URL")
-    if url is None:
-        raise RuntimeError(
-            "BENCH_VALKEY_URL is not set; either run via "
-            "`uv run python benchmarks/run_all.py` or set the env var "
-            "manually before invoking a bench script.",
-        )
-    return url
-
-
-# ---------------------------------------------------------------------------
-# Async runner shim — pyperf's bench_async_func wants a callable returning
-# an awaitable, not a coroutine. This helper packages the loop creation.
-# ---------------------------------------------------------------------------
-
-
-def make_async_runner(coro_factory: Any) -> Any:
-    """Wrap ``coro_factory`` so each pyperf iteration gets a fresh task.
-
-    ``coro_factory`` is a 0-arg callable returning a coroutine. The
-    returned function is what pyperf calls per iteration. We do NOT
-    create a new event loop per iteration (that's millisecond-scale
-    overhead that would dominate fast scenarios) — the loop is bound by
-    pyperf's ``Runner.bench_async_func`` itself.
-    """
-
-    async def _run() -> None:
-        await coro_factory()
-
-    return _run
-
-
-# ---------------------------------------------------------------------------
-# pyperf environment-inheritance helper
-# ---------------------------------------------------------------------------
-
-
-def ensure_bench_env_inherited() -> None:
-    """Inject ``--copy-env`` into ``sys.argv`` when not already a pyperf worker.
-
-    pyperf worker subprocesses are spawned with a minimal environment (only
-    ``PATH``, ``HOME``, ``PYTHONPATH``, etc.) — ``BENCH_VALKEY_URL`` and the
-    other bench-specific env vars are not forwarded by default.  Calling this
-    function from a bench script's ``main()`` ensures the env is copied in full
-    to every worker subprocess, without requiring callers to pass
-    ``--copy-env`` on the CLI.
-
-    Safe to call multiple times (idempotent).
-    """
-    import sys
-
-    if "--worker" not in sys.argv and "--copy-env" not in sys.argv:
-        sys.argv.insert(1, "--copy-env")
-
-
 __all__ = [
     "BENCH_SKIP_GLIDE",
+    "CLIENT_ORDER",
     "HOT_KEY",
     "LARGE_VALUE",
     "MGET_KEYS",
     "PIPELINE_KEYS",
     "SMALL_VALUE",
-    "ensure_bench_env_inherited",
     "flush",
-    "get_valkey_url",
     "glide_async_client",
-    "make_async_runner",
     "py_async_client",
     "py_client",
     "rs_async_client",

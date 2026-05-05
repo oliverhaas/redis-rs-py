@@ -10,9 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Reproducible benchmark suite under `benchmarks/`: 8 scenarios (sync GET / SET / MGET, sync pipeline, async single-task, async 100-task, pubsub, connect) running each of `redis-rs-py`, `redis-py[hiredis]`, `valkey-glide` against the same Valkey container.
-- `benchmarks/run_all.py` orchestrator: spins up Valkey via testcontainers, runs every bench script in a fresh subprocess, renders side-by-side `benchmarks/RESULTS.md` from the pyperf JSON dumps.
+- `benchmarks/run_all.py` orchestrator: spins up Valkey via testcontainers, runs the bench tests via `pytest --benchmark-only`, renders side-by-side `benchmarks/RESULTS.md` from the pytest-benchmark JSON output.
 - `bench.yml` GitHub Action: smoke benchmark on every PR (gate), full nightly benchmark (artifact-uploaded).
-- `bench` dependency group (`pyperf`, `redis[hiredis]`, `valkey-glide`) — opt-in via `uv sync --group bench`.
+- `bench` dependency group (`pytest-benchmark`, `redis[hiredis]`, `valkey-glide`) — opt-in via `uv sync --group bench`.
 - Full `redis.exceptions`-compatible hierarchy (`RedisError`, `ConnectionError`, `TimeoutError`, `BusyLoadingError`, `AuthenticationError`, `ResponseError`, `NoScriptError`, `ExecAbortError`, `ReadOnlyError`, `OutOfMemoryError`, `NoPermissionError`, `ModuleError`, `LockError`, `LockNotOwnedError`, `WatchError`, `PubSubError`, `MasterDownError`, `SlaveError`, `ClusterError`, `ClusterDownError`, `ClusterCrossSlotError`, `MovedError`, `AskError`, `TryAgainError`, `DataError`, `InvalidResponse`, `AuthenticationWrongNumberOfArgsError`).
 - Boundary classifier `errors::classify_error` mapping `redis-rs` errors → exception class via `ErrorKind` + `ServerErrorKind` + message-prefix sniffing.
 - Top-level re-exports: `from redis_rs_py import RedisError` matches the redis-py user idiom.

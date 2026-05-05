@@ -55,7 +55,11 @@ dev = [
   "redis==7.4.0",
   "valkey==6.1.1",
 ]
-bench = ["pyperf==2.10.0", "redis[hiredis]==7.4.0", "valkey-glide==2.3.1"]
+bench = [
+  "pytest-benchmark==5.1.0",
+  "redis[hiredis]==7.4.0",
+  "valkey-glide==2.3.1",
+]
 
 [build-system]
 requires = ["maturin>=1.13,<2.0"]
