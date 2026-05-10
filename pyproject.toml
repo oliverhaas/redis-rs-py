@@ -56,7 +56,7 @@ dev = [
   "valkey==6.1.1",
 ]
 bench = [
-  "pytest-benchmark==5.1.0",
+  "pytest-benchmark==5.2.3",
   "redis[hiredis]==7.4.0",
   "valkey-glide==2.3.1",
 ]
