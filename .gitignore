@@ -18,6 +18,9 @@ CLAUDE.md
 *.sqlite3
 scheduled_tasks.lock
 
+# pytest-codspeed walltime JSON dumps — per-run, regenerated on every bench
+benchmarks/results/*.json
+
 # Rust build artifacts
 target/
 python/redis_rs_py/_driver*.so

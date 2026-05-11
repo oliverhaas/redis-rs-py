@@ -84,7 +84,7 @@ def pipeline_keys(valkey_url: str) -> str:
 def event_loop() -> Iterator[asyncio.AbstractEventLoop]:
     """Module-scoped event loop reused across async benchmarks.
 
-    pytest-benchmark expects sync callables, so async benchmarks call
+    pytest-codspeed expects sync callables, so async benchmarks call
     ``loop.run_until_complete(coro)`` per inner iteration. Reusing one
     loop avoids the ~50-100 us ``asyncio.new_event_loop()`` cost
     dominating every fast scenario.

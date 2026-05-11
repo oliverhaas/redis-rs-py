@@ -5,14 +5,15 @@ Usage:
 
     uv run --group bench python benchmarks/run_all.py [--smoke]
 
-``--smoke`` runs each benchmark with one round / no warmup for a fast
-gate-on-PR run; the full nightly run calibrates rounds + warmup
-automatically (pytest-benchmark defaults).
+``--smoke`` runs each benchmark with a single round and no warmup for a
+fast gate-on-PR run; the full nightly run uses pytest-codspeed's
+walltime defaults (1 s warmup, up to 3 s of timed rounds).
 
 Internally this just spins up a single Valkey container, exports
 ``BENCH_VALKEY_URL``, and exec's pytest against the ``benchmarks/``
-directory with ``--benchmark-only``. The pytest run produces a JSON
-dump that we then aggregate into RESULTS.md.
+directory with ``--codspeed --codspeed-mode=walltime``. Codspeed writes
+a JSON dump per session to ``$CODSPEED_PROFILE_FOLDER/results/<pid>.json``;
+we point it at ``benchmarks/results/`` and aggregate from there.
 """
 
 import argparse
@@ -27,7 +28,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BENCH_DIR = REPO_ROOT / "benchmarks"
 RESULTS_DIR = BENCH_DIR / "results"
-RESULTS_JSON = RESULTS_DIR / "all.json"
 RESULTS_MD = BENCH_DIR / "RESULTS.md"
 
 CLIENT_ORDER: list[str] = ["redis-rs-py", "redis-py[hiredis]", "valkey-glide"]
@@ -38,6 +38,20 @@ _CLIENT_SUFFIXES: list[tuple[str, str]] = [
     ("redis_rs_py", "redis-rs-py"),
     ("redis_py_hiredis", "redis-py[hiredis]"),
     ("valkey_glide", "valkey-glide"),
+]
+
+# Codspeed's walltime JSON does NOT surface the @pytest.mark.benchmark(group=...)
+# value, so we re-derive the scenario from the test-name prefix. Longest prefix
+# first so e.g. "test_async_single_" beats a hypothetical "test_async_" match.
+_GROUP_PREFIXES: list[tuple[str, str]] = [
+    ("test_async_single_", "async-single"),
+    ("test_async_100_", "async-100"),
+    ("test_pipeline_", "pipeline-1000"),
+    ("test_pubsub_", "pubsub-1000"),
+    ("test_connect_", "connect"),
+    ("test_mget_", "mget"),
+    ("test_get_", "get"),
+    ("test_set_", "set"),
 ]
 
 
@@ -53,9 +67,15 @@ def _spawn_valkey():
     return container, f"redis://{host}:{port}/0"
 
 
-def _run_pytest(smoke: bool, env: dict[str, str], scenarios: list[str] | None) -> None:
+def _clear_results_dir() -> None:
     RESULTS_DIR.mkdir(exist_ok=True)
-    RESULTS_JSON.unlink(missing_ok=True)
+    for stale in RESULTS_DIR.glob("*.json"):
+        stale.unlink()
+
+
+def _run_pytest(smoke: bool, env: dict[str, str], scenarios: list[str] | None) -> None:
+    _clear_results_dir()
+    env = {**env, "CODSPEED_PROFILE_FOLDER": str(BENCH_DIR)}
 
     cmd: list[str] = [
         sys.executable,
@@ -66,8 +86,8 @@ def _run_pytest(smoke: bool, env: dict[str, str], scenarios: list[str] | None) -
         # bench timing. Override addopts wholesale to strip them.
         "-o",
         "addopts=",
-        "--benchmark-only",
-        f"--benchmark-json={RESULTS_JSON}",
+        "--codspeed",
+        "--codspeed-mode=walltime",
         "--no-cov",
         "-p",
         "no:xdist",
@@ -75,16 +95,11 @@ def _run_pytest(smoke: bool, env: dict[str, str], scenarios: list[str] | None) -
     ]
     if smoke:
         cmd += [
-            "--benchmark-min-rounds=1",
-            "--benchmark-warmup=off",
-            "--benchmark-min-time=0.000001",
+            "--codspeed-warmup-time=0",
+            "--codspeed-max-rounds=1",
         ]
-    else:
-        cmd += [
-            "--benchmark-warmup=on",
-            "--benchmark-warmup-iterations=5",
-            "--benchmark-min-rounds=10",
-        ]
+    # Full mode uses codspeed defaults: 1 s warmup, up to 3 s of timed
+    # rounds, auto-sized iter-per-round from warmup mean.
     if scenarios:
         # `-k` filter: matches any test name containing one of the scenario
         # words (e.g. "get or set or pipeline").
@@ -99,6 +114,11 @@ def _run_pytest(smoke: bool, env: dict[str, str], scenarios: list[str] | None) -
         print(f"pytest exited with {result.returncode}; rendering whatever ran", file=sys.stderr)
 
 
+def _latest_results_json() -> Path | None:
+    candidates = sorted(RESULTS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
 def _client_from_name(test_name: str) -> str | None:
     for suffix, display in _CLIENT_SUFFIXES:
         if test_name.endswith(suffix):
@@ -106,23 +126,32 @@ def _client_from_name(test_name: str) -> str | None:
     return None
 
 
+def _group_from_name(test_name: str) -> str | None:
+    for prefix, group in _GROUP_PREFIXES:
+        if test_name.startswith(prefix):
+            return group
+    return None
+
+
 def _load_results(path: Path) -> dict[str, dict[str, dict[str, float]]]:
-    """Return ``{group: {client: stats}}``."""
+    """Return ``{group: {client: stats}}`` from a codspeed walltime JSON dump."""
     raw = json.loads(path.read_text())
     out: dict[str, dict[str, dict[str, float]]] = {}
     for bench in raw.get("benchmarks", []):
-        group = bench.get("group") or "<ungrouped>"
-        client = _client_from_name(bench.get("name", ""))
-        if client is None:
+        name = bench.get("name", "")
+        group = _group_from_name(name)
+        client = _client_from_name(name)
+        if group is None or client is None:
             continue
         stats = bench.get("stats", {})
-        median = stats.get("median", 0.0)
+        median_ns = stats.get("median_ns", 0.0) or 0.0
+        median_s = median_ns / 1e9
         out.setdefault(group, {})[client] = {
-            "median": median,
-            "mean": stats.get("mean", 0.0),
-            "stddev": stats.get("stddev", 0.0),
+            "median": median_s,
+            "mean": (stats.get("mean_ns", 0.0) or 0.0) / 1e9,
+            "stddev": (stats.get("stdev_ns", 0.0) or 0.0) / 1e9,
             "rounds": stats.get("rounds", 0),
-            "ops_per_sec": (1.0 / median) if median > 0 else 0.0,
+            "ops_per_sec": (1e9 / median_ns) if median_ns > 0 else 0.0,
         }
     return out
 
@@ -164,7 +193,7 @@ def _render_report(by_scenario: dict[str, dict[str, dict[str, float]]], full_run
         f"- Platform: {platform.platform()}",
         f"- Python: {py_ver}",
         f"- Valkey image: `{VALKEY_IMAGE}`",
-        f"- Run mode: {'full (pytest-benchmark calibrated)' if full_run else 'smoke (--benchmark-min-rounds=1)'}",
+        f"- Run mode: {'full (codspeed walltime defaults)' if full_run else 'smoke (--codspeed-max-rounds=1)'}",
         "",
         "## Results",
         "",
@@ -187,8 +216,8 @@ def _render_report(by_scenario: dict[str, dict[str, dict[str, float]]], full_run
             "",
             "- One Valkey container per `run_all.py` invocation; FLUSHDB between scenarios where state matters.",
             "- All clients use the same database (db=0), `decode_responses=False`, and the same hot-key payload (100 bytes).",
-            "- Bench tests share a single Python process. pytest-benchmark calibrates inner-iteration count per benchmark and reports the median. Cross-client cache contamination is acknowledged and discussed in the project README — for absolute publishable numbers, pin the order or run scenarios in isolated subprocesses.",
-            "- pytest-benchmark warmup is on by default (full run); smoke mode disables it.",
+            "- Bench tests share a single Python process. pytest-codspeed (walltime mode) calibrates the inner-iteration count from a warmup pass and reports the median round time; we convert to ops/sec as `1 / median`. Cross-client cache contamination is acknowledged and discussed in the project README — for absolute publishable numbers, pin the order or run scenarios in isolated subprocesses.",
+            "- Codspeed runs a 1-second warmup by default (full run); smoke mode sets `--codspeed-warmup-time=0 --codspeed-max-rounds=1`.",
             "- valkey-glide has no sync API; sync scenarios run via `loop.run_until_complete(coro)` per call. The setup overhead this adds is **disclosed** but constant — direct comparison of valkey-glide on sync scenarios is structurally pessimistic for it.",
             "- Valkey image is pinned (`BENCH_VALKEY_IMAGE` env, defaults to `valkey/valkey:8.0`).",
             "- CI runners are noisy across cloud providers — the **source of truth** is a local run on the reference machine documented above. CI runs are smoke-only and exist to prevent regressions in the bench-suite plumbing, not to publish numbers.",
@@ -232,11 +261,12 @@ def main() -> int:
         finally:
             container.stop()
 
-    if not RESULTS_JSON.exists():
-        print(f"no results JSON at {RESULTS_JSON}", file=sys.stderr)
+    results_json = _latest_results_json()
+    if results_json is None:
+        print(f"no results JSON in {RESULTS_DIR}", file=sys.stderr)
         return 1
 
-    by_scenario = _load_results(RESULTS_JSON)
+    by_scenario = _load_results(results_json)
     RESULTS_MD.write_text(_render_report(by_scenario, full_run=not args.smoke))
     print(f"\nwrote {RESULTS_MD}")
     return 0
