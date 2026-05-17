@@ -42,27 +42,27 @@ Issues = "https://github.com/oliverhaas/redis-rs-py/issues"
 
 [dependency-groups]
 dev = [
-  "maturin==1.13.1",
+  "maturin==1.13.3",
   "pre-commit==4.6.0",
   "pytest==9.0.3",
   "pytest-asyncio==1.3.0",
   "pytest-cov==7.1.0",
   "pytest-xdist==3.8.0",
-  "ruff==0.15.12",
+  "ruff==0.15.13",
   "testcontainers==4.14.2",
-  "ty==0.0.34",
+  "ty==0.0.37",
   # Reference clients used by the parity test suite
   "redis==7.4.0",
   "valkey==6.1.1",
 ]
 bench = [
-  "pytest-codspeed==4.5.0",
+  "pytest-codspeed==5.0.2",
   "redis[hiredis]==7.4.0",
   "valkey-glide==2.3.1",
 ]
 
 [build-system]
-requires = ["maturin>=1.13,<2.0"]
+requires = ["maturin>=1.13.3,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
