@@ -48,9 +48,9 @@ dev = [
   "pytest-asyncio==1.4.0",
   "pytest-cov==7.1.0",
   "pytest-xdist==3.8.0",
-  "ruff==0.15.18",
+  "ruff==0.15.20",
   "testcontainers==4.14.2",
-  "ty==0.0.51",
+  "ty==0.0.55",
   # Reference clients used by the parity test suite
   "redis==7.4.0",
   "valkey==6.1.1",
@@ -58,7 +58,7 @@ dev = [
 bench = [
   "pytest-codspeed==5.0.3",
   "redis[hiredis]==7.4.0",
-  "valkey-glide==2.4.1",
+  "valkey-glide==2.4.2",
 ]
 
 [build-system]
