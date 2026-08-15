@@ -15,13 +15,13 @@ def _reset_warn_state():
     _facade_reset_warn_state()
 
 
-def test_unimplemented_known_kwarg_warns():
+def test_unimplemented_known_kwarg_warns(valkey_conn_kwargs):
     """A redis-py kwarg we don't implement yet emits exactly one UserWarning."""
     from redis_rs_py import Redis
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        r = Redis(retry_on_timeout=True)
+        r = Redis(**valkey_conn_kwargs, retry_on_timeout=True)
         r.close()
 
     user_warns = [x for x in w if issubclass(x.category, UserWarning)]
@@ -29,28 +29,28 @@ def test_unimplemented_known_kwarg_warns():
     assert "retry_on_timeout" in str(user_warns[0].message)
 
 
-def test_unimplemented_kwarg_warns_once():
+def test_unimplemented_kwarg_warns_once(valkey_conn_kwargs):
     """The same unimplemented kwarg only emits one warning per process (deduped)."""
     from redis_rs_py import Redis
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        r1 = Redis(retry_on_timeout=True)
+        r1 = Redis(**valkey_conn_kwargs, retry_on_timeout=True)
         r1.close()
-        r2 = Redis(retry_on_timeout=True)
+        r2 = Redis(**valkey_conn_kwargs, retry_on_timeout=True)
         r2.close()
 
     user_warns = [x for x in w if issubclass(x.category, UserWarning)]
     assert len(user_warns) == 1, "Expected exactly one warning for repeated kwarg"
 
 
-def test_unknown_kwarg_emits_runtime_warning():
+def test_unknown_kwarg_emits_runtime_warning(valkey_conn_kwargs):
     """A kwarg not in the redis-py 5.x signature at all emits a RuntimeWarning."""
     from redis_rs_py import Redis
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        r = Redis(totally_made_up_kwarg=42)
+        r = Redis(**valkey_conn_kwargs, totally_made_up_kwarg=42)
         r.close()
 
     runtime_warns = [x for x in w if issubclass(x.category, RuntimeWarning)]
@@ -71,13 +71,13 @@ def test_implemented_kwargs_no_warning(valkey_url: str):
     assert user_warns == [], f"Unexpected warnings: {user_warns}"
 
 
-def test_multiple_unimplemented_kwargs_each_warn_once():
+def test_multiple_unimplemented_kwargs_each_warn_once(valkey_conn_kwargs):
     """Multiple distinct unimplemented kwargs each produce one warning."""
     from redis_rs_py import Redis
 
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        r = Redis(retry_on_timeout=True, retry_on_error=[])
+        r = Redis(**valkey_conn_kwargs, retry_on_timeout=True, retry_on_error=[])
         r.close()
 
     user_warns = [x for x in w if issubclass(x.category, UserWarning)]

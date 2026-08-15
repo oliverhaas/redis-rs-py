@@ -1,56 +1,53 @@
 """Tests for Redis.__new__ / Redis.__init__ constructor behaviour."""
 
+import pytest
 
-def test_default_construction():
-    """Redis() with no args constructs without raising."""
+
+def _assert_accepts_kwargs(**kwargs) -> None:
+    """Assert `Redis(**kwargs)` accepts the kwargs; connection failure is tolerated."""
     from redis_rs_py import Redis
 
-    r = Redis()
+    try:
+        r = Redis(**kwargs)
+    except (TypeError, ValueError) as exc:
+        pytest.fail(f"Constructor rejected kwargs {kwargs!r}: {exc!r}")
+    except Exception:
+        return
     assert r is not None
     r.close()
+
+
+def test_default_construction():
+    """Redis() with no args constructs without raising a kwarg error."""
+    _assert_accepts_kwargs()
 
 
 def test_explicit_host_port():
     """host= and port= kwargs are accepted; construction should not raise a TypeError."""
-    from redis_rs_py import Redis
-
-    # Construction with an unreachable port should either succeed (lazy connect)
-    # or raise a connection error — but never a TypeError / ValueError about
-    # the kwargs themselves.
-    try:
-        r = Redis(host="127.0.0.1", port=6380)
-        assert r is not None
-        r.close()
-    except Exception as exc:
-        # Connection failure is acceptable; kwarg errors are not.
-        assert not isinstance(exc, (TypeError, ValueError)), f"Constructor raised unexpected error: {exc!r}"
+    _assert_accepts_kwargs(host="127.0.0.1", port=6380)
 
 
-def test_db_kwarg_int():
+def test_db_kwarg_int(valkey_conn_kwargs):
     """db= as int is accepted."""
     from redis_rs_py import Redis
 
-    r = Redis(db=3)
-    assert r is not None
+    r = Redis(**valkey_conn_kwargs, db=3)
+    assert r.ping() is True
     r.close()
 
 
-def test_db_kwarg_str():
+def test_db_kwarg_str(valkey_conn_kwargs):
     """db= as str is accepted (redis-py allows it)."""
     from redis_rs_py import Redis
 
-    r = Redis(db="3")
-    assert r is not None
+    r = Redis(**valkey_conn_kwargs, db="3")
+    assert r.ping() is True
     r.close()
 
 
 def test_password_kwarg():
-    """password= is accepted (connection may fail, but construction does not)."""
-    from redis_rs_py import Redis
-
-    r = Redis(password="secret")
-    assert r is not None
-    r.close()
+    """password= is accepted (the container has no auth, so AUTH itself fails)."""
+    _assert_accepts_kwargs(password="secret")
 
 
 def test_context_manager(valkey_url: str):

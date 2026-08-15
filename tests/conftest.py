@@ -156,6 +156,19 @@ def driver(valkey_url: str) -> _DriverCompat:
 
 
 @pytest.fixture
+def valkey_conn_kwargs(valkey_url: str) -> dict[str, Any]:
+    """`host`/`port` kwargs for the container, for tests that cannot use `from_url`.
+
+    `Redis(...)` connects eagerly, so a bare `Redis()` would target
+    localhost:6379: present on a dev box, absent in CI.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(valkey_url)
+    return {"host": parsed.hostname, "port": parsed.port}
+
+
+@pytest.fixture
 def redis_client(valkey_url: str):
     """Sync Redis client fixture (new API name)."""
     import redis
