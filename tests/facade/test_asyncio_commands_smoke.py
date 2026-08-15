@@ -1,7 +1,30 @@
 """Smoke tests for every asyncio façade command method."""
 
+import asyncio
+import time
+
 import pytest
 from redis_rs_py.asyncio import Redis
+
+# Mirrors _BGSAVE_RETRY / _BGREWRITEAOF_RETRY in tests/compat/_verifiers/admin.py.
+_BG_BUSY_PHRASES = ("already in progress", "another child process is active", "background append")
+_BG_BUSY_TIMEOUT = 15.0
+
+
+async def _run_when_not_busy(op) -> None:
+    """Await `op()`, retrying while the server has a background child active."""
+    deadline = time.monotonic() + _BG_BUSY_TIMEOUT
+    while True:
+        try:
+            await op()
+        except Exception as exc:
+            if not any(phrase in str(exc).lower() for phrase in _BG_BUSY_PHRASES):
+                raise
+            if time.monotonic() >= deadline:
+                pytest.skip(f"background save contention exceeded {_BG_BUSY_TIMEOUT:.0f}s")
+            await asyncio.sleep(0.5)
+        else:
+            return
 
 
 @pytest.fixture
@@ -406,6 +429,8 @@ async def test_stream_xclaim_xautoclaim_xsetid(r: Redis) -> None:
 # --- scripts + admin ------------------------------------------------------
 
 
+# Script cache is server-global, not per-DB: another worker's SCRIPT FLUSH wins.
+@pytest.mark.xdist_group(name="redis_global_state")
 @pytest.mark.asyncio
 async def test_scripts_eval_evalsha(r: Redis) -> None:
     sha = await r.script_load("return KEYS[1]")
@@ -457,5 +482,5 @@ async def test_admin_basic(r: Redis) -> None:
     t = await r.time()
     assert isinstance(t, (list, tuple)) and len(t) == 2
     await r.lastsave()
-    await r.bgsave()
-    await r.bgrewriteaof()
+    await _run_when_not_busy(r.bgsave)
+    await _run_when_not_busy(r.bgrewriteaof)

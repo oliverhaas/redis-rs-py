@@ -34,6 +34,14 @@ def _verify_flushdb(rs, py) -> None:
 
 @verifier("FLUSHALL")
 def _verify_flushall(rs, py) -> None:
+    import os
+
+    import pytest
+
+    # FLUSHALL wipes every DB, so xdist_group is not enough: unrelated workers
+    # keep running. Same guard as TestFlushall in driver/test_commands_admin.py.
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        pytest.skip("FLUSHALL would race other xdist workers' DBs")
     py.set("k", b"v")
     assert _ok(rs.flushall())
     assert py.dbsize() == 0

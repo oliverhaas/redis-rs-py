@@ -453,6 +453,8 @@ def test_eval_keys_argv(r):
     assert result == b"42"
 
 
+# Script cache is server-global, not per-DB: another worker's SCRIPT FLUSH wins.
+@pytest.mark.xdist_group(name="redis_global_state")
 def test_script_load_evalsha(r):
     sha = r.script_load("return 'loaded'")
     assert isinstance(sha, str) and len(sha) == 40
@@ -460,6 +462,7 @@ def test_script_load_evalsha(r):
     assert result == b"loaded"
 
 
+@pytest.mark.xdist_group(name="redis_global_state")
 def test_script_exists(r):
     sha = r.script_load("return 1")
     sha_str = sha
@@ -467,6 +470,7 @@ def test_script_exists(r):
     assert exists == [True]
 
 
+@pytest.mark.xdist_group(name="redis_global_state")
 def test_script_flush(r):
     r.script_flush()
 
