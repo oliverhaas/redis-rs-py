@@ -8,12 +8,12 @@ uv run --group bench python benchmarks/run_all.py
 
 ## Reference machine
 
-- Generated: 2026-05-11T06:19:51+00:00
+- Generated: 2026-05-11T07:54:07+00:00
 - CPU: x86_64
 - Platform: Linux-6.17.0-22-generic-x86_64-with-glibc2.39
 - Python: 3.14.2 (main, Dec 17 2025, 21:08:09) [Clang 21.1.4 ]
 - Valkey image: `valkey/valkey:8.0`
-- Run mode: smoke (--codspeed-max-rounds=1)
+- Run mode: full (codspeed walltime defaults)
 
 ## Results
 
@@ -21,14 +21,14 @@ Higher ops/sec is better. **Bold** is the redis-rs-py baseline; the parenthesise
 
 | Scenario | redis-rs-py | redis-py[hiredis] | valkey-glide |
 |---|---|---|---|
-| `async-100` | **2,041 ops/s** (489.9 us) | 280 ops/s (0.14x) | 385 ops/s (0.19x) |
-| `async-single` | **5,676 ops/s** (176.2 us) | 8,866 ops/s (1.56x) | 4,620 ops/s (0.81x) |
-| `connect` | **2,797 ops/s** (357.5 us) | 936 ops/s (0.33x) | 961 ops/s (0.34x) |
-| `get` | **13,208 ops/s** (75.7 us) | 13,278 ops/s (1.01x) | 5,940 ops/s (0.45x) |
-| `mget` | **7,122 ops/s** (140.4 us) | 10,119 ops/s (1.42x) | 3,813 ops/s (0.54x) |
-| `pipeline-1000` | **863 ops/s** (1158.1 us) | 403 ops/s (0.47x) | 296 ops/s (0.34x) |
-| `pubsub-1000` | **14 ops/s** (70435.1 us) | 10 ops/s (0.67x) | 6 ops/s (0.41x) |
-| `set` | **12,316 ops/s** (81.2 us) | 12,644 ops/s (1.03x) | 6,552 ops/s (0.53x) |
+| `async-100` | **2,355 ops/s** (424.6 us) | 286 ops/s (0.12x) | 583 ops/s (0.25x) |
+| `async-single` | **9,107 ops/s** (109.8 us) | 10,357 ops/s (1.14x) | 6,484 ops/s (0.71x) |
+| `connect` | **3,775 ops/s** (264.9 us) | 492 ops/s (0.13x) | 417 ops/s (0.11x) |
+| `get` | **18,746 ops/s** (53.3 us) | 15,671 ops/s (0.84x) | 6,479 ops/s (0.35x) |
+| `mget` | **10,212 ops/s** (97.9 us) | 10,741 ops/s (1.05x) | 4,313 ops/s (0.42x) |
+| `pipeline-1000` | **1,142 ops/s** (875.7 us) | 387 ops/s (0.34x) | 339 ops/s (0.30x) |
+| `pubsub-1000` | **14 ops/s** (70162.7 us) | 10 ops/s (0.68x) | 6 ops/s (0.41x) |
+| `set` | **18,632 ops/s** (53.7 us) | 14,330 ops/s (0.77x) | 6,386 ops/s (0.34x) |
 
 ## Methodology
 
