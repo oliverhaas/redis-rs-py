@@ -68,12 +68,12 @@ jobs:
             cibw_build: cp314-win_amd64 cp314t-win_amd64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v3.4
+        uses: pypa/cibuildwheel@v4.2
         env:
           CIBW_BUILD: ${{ matrix.cibw_build }}
           CIBW_ENABLE: cpython-freethreading
@@ -96,7 +96,7 @@ jobs:
     if: inputs.build_sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
 
