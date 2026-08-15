@@ -1,9 +1,23 @@
-# Disabled while in early development. Re-enable by uncommenting the
-# contents below (keep paired with publish.yml — this workflow auto-tags
-# on version bumps and triggers publish.yml).
+# Disabled while in early development. The real auto-tag logic is kept
+# commented out at the bottom of this file; only a manual `workflow_dispatch`
+# stub is active so GitHub sees a valid workflow instead of failing every push
+# with a workflow-file error.
 #
-# name: Tag
-#
+# Re-enable by restoring the `workflow_run` trigger and the `tag` job below,
+# and deleting the `disabled` job. Keep it paired with publish.yml; the real
+# workflow auto-tags on version bumps and triggers publish.yml.
+
+name: Tag
+
+on:
+  workflow_dispatch:
+
+jobs:
+  disabled:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Tag workflow is disabled while in early development."
+
 # on:
 #   workflow_run:
 #     workflows: ["CI"]
