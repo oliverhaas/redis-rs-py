@@ -77,6 +77,11 @@ target-version = "py314"
 line-length = 120
 fix = true
 
+[tool.ruff.format]
+# Recent ruff formats Python code blocks inside Markdown. The plan documents are
+# frozen historical records, so reformatting them is pure churn.
+exclude = ["docs/superpowers/plans/*.md"]
+
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
@@ -87,6 +92,7 @@ ignore = [
   "N818",    # InvalidResponse follows redis-py naming; does not need Error suffix
   "ANN401",  # Any is correct for arbitrary Redis values
   "COM812",  # Conflicts with ruff-format
+  "CPY001",  # MIT licence lives in LICENSE; no per-file copyright headers
   "D",       # Docstrings — add incrementally
   "E501",    # Line length handled by config
   "EM",      # Inline exception strings are fine
