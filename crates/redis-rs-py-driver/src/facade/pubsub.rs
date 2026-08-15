@@ -541,8 +541,7 @@ fn parse_timeout(py: Python<'_>, t: &Py<PyAny>) -> PyResult<Option<Duration>> {
 }
 
 fn coerce_name(v: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
-    #[allow(deprecated)]
-    if let Ok(b) = v.downcast::<PyBytes>() {
+    if let Ok(b) = v.cast::<PyBytes>() {
         return Ok(b.as_bytes().to_vec());
     }
     if let Ok(s) = v.extract::<&str>() {
@@ -998,8 +997,7 @@ impl PubSub {
                             continue;
                         }
                         // Dispatch to handler.
-                        #[allow(deprecated)]
-                        let dict = msg.downcast::<PyDict>()?;
+                        let dict = msg.cast::<PyDict>()?;
                         let kind: String = dict.get_item("type")?.unwrap().extract()?;
                         let handler_opt = {
                             let bind_pubsub = pubsub_py.bind(py).borrow();
