@@ -48,9 +48,9 @@ dev = [
   "pytest-asyncio==1.4.0",
   "pytest-cov==7.1.0",
   "pytest-xdist==3.8.0",
-  "ruff==0.16.6",
+  "ruff==0.16.8",
   "testcontainers==4.15.0",
-  "ty==0.0.80",
+  "ty==0.0.81",
   # Reference clients used by the parity test suite
   "redis==7.4.0",
   "valkey==6.1.1",
