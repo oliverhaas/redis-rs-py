@@ -76,7 +76,6 @@ jobs:
         uses: pypa/cibuildwheel@v4.2
         env:
           CIBW_BUILD: ${{ matrix.cibw_build }}
-          CIBW_ENABLE: cpython-freethreading
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
           # Linux builds run inside manylinux/musllinux containers — install Rust there.
           CIBW_BEFORE_ALL_LINUX: |
