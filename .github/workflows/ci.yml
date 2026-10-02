@@ -93,7 +93,7 @@ jobs:
             wheel_glob: "redis_rs_py-*-cp314-cp314-*manylinux*x86_64.whl"
           - label: linux-x86_64-musllinux
             runs-on: ubuntu-latest
-            container: alpine:3.20
+            container: python:3.14-alpine
             python: "3.14"
             wheel_glob: "redis_rs_py-*-cp314-cp314-*musllinux*x86_64.whl"
           - label: linux-aarch64-manylinux
@@ -116,10 +116,6 @@ jobs:
           name: wheels-${{ matrix.label }}
           path: wheelhouse
 
-      - name: Install Python (musllinux Alpine container)
-        if: matrix.label == 'linux-x86_64-musllinux'
-        run: apk add --no-cache python3=~3.14 py3-pip
-
       - name: Install uv
         if: matrix.label != 'linux-x86_64-musllinux'
         uses: astral-sh/setup-uv@v7
@@ -140,7 +136,7 @@ jobs:
         shell: bash
         run: |
           uv venv --python ${{ matrix.python }} smoke
-          source smoke/bin/activate || smoke/Scripts/activate
+          source smoke/bin/activate || source smoke/Scripts/activate
           uv pip install --no-deps wheelhouse/${{ matrix.wheel_glob }}
           python -c "from redis_rs_py import _driver; print('OK', _driver.__version__)"
 
@@ -180,7 +176,7 @@ jobs:
         shell: bash
         run: |
           uv venv --python 3.14t smoke
-          source smoke/bin/activate || smoke/Scripts/activate
+          source smoke/bin/activate || source smoke/Scripts/activate
           uv pip install --no-deps wheelhouse/${{ matrix.wheel_glob }}
           python -c "
           import sys

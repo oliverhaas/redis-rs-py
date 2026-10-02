@@ -46,7 +46,7 @@ jobs:
             wheel_glob: "redis_rs_py-*-cp314-cp314t-*manylinux*x86_64.whl"
           - label: linux-x86_64-musllinux
             runs-on: ubuntu-latest
-            container: alpine:3.20
+            container: python:3.14-alpine
             python: "3.14"
             wheel_glob: "redis_rs_py-*-cp314-cp314-*musllinux*x86_64.whl"
           - label: linux-aarch64-manylinux
@@ -82,31 +82,27 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Install Python (Alpine)
-        if: matrix.container == 'alpine:3.20'
-        run: apk add --no-cache python3=~3.14 py3-pip || apk add --no-cache python3 py3-pip
-
       - name: Install uv
-        if: matrix.container != 'alpine:3.20'
+        if: matrix.container != 'python:3.14-alpine'
         uses: astral-sh/setup-uv@v7
 
       - name: Set up Python ${{ matrix.python }}
-        if: matrix.container != 'alpine:3.20'
+        if: matrix.container != 'python:3.14-alpine'
         run: uv python install ${{ matrix.python }}
 
       - name: Install wheel + verify import (Alpine)
-        if: matrix.container == 'alpine:3.20'
+        if: matrix.container == 'python:3.14-alpine'
         run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install --no-deps dist/${{ matrix.wheel_glob }}
           /tmp/venv/bin/python -c "from redis_rs_py import _driver; print('OK', _driver.__version__)"
 
       - name: Install wheel + verify import (non-Alpine)
-        if: matrix.container != 'alpine:3.20'
+        if: matrix.container != 'python:3.14-alpine'
         shell: bash
         run: |
           uv venv --python ${{ matrix.python }} smoke
-          source smoke/bin/activate || smoke/Scripts/activate
+          source smoke/bin/activate || source smoke/Scripts/activate
           uv pip install --no-deps dist/${{ matrix.wheel_glob }}
           python -c "from redis_rs_py import _driver; print('OK', _driver.__version__)"
 
