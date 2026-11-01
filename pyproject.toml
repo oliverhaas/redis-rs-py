@@ -44,13 +44,13 @@ Issues = "https://github.com/oliverhaas/redis-rs-py/issues"
 dev = [
   "maturin==1.15.0",
   "pre-commit==4.7.0",
-  "pytest==9.1.1",
-  "pytest-asyncio==1.4.0",
+  "pytest==9.2.0",
+  "pytest-asyncio==1.4.1",
   "pytest-cov==7.1.0",
   "pytest-xdist==3.8.0",
-  "ruff==0.17.1",
+  "ruff==0.17.3",
   "testcontainers==4.15.0",
-  "ty==0.0.90",
+  "ty==0.0.94",
   # Reference clients used by the parity test suite
   "redis==7.4.0",
   "valkey==6.2.0",
